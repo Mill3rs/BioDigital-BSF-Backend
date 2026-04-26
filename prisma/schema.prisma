@@ -1,0 +1,897 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// User Roles and Authentication
+model User {
+  id             String         @id @default(cuid())
+  email          String         @unique
+  password       String
+  fullName       String
+  phoneNumber    String?
+  profileImage   String?
+  role           UserRole       @default(USER)
+  status         UserStatus     @default(ACTIVE)
+  onboardingStep OnboardingStep @default(COMPLETE)
+  emailVerified  Boolean        @default(false)
+  phoneVerified  Boolean        @default(false)
+  lastLogin      DateTime?
+  // Enhanced fields
+  fcmToken           String?
+  twoFactorEnabled   Boolean        @default(false)
+  twoFactorSecret    String?
+  lastActiveAt       DateTime?
+  deletedAt          DateTime?
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  // Relations
+  adminManaged Admin?  @relation("AdminManagesManager", fields: [managedById], references: [id])
+  managedById  String?
+
+  farm              Farm?
+  driverProfile     DriverProfile?
+  buyerProfile      BuyerProfile?
+  supplierProfile   SupplierProfile?
+  notifications     Notification[]
+  wasteRecords      WasteRecord[]     @relation("RecordedWaste")
+  supplierWastes    WasteRecord[]     @relation("SupplierWaste")
+  driverCollections WasteRecord[]     @relation("DriverCollection")
+  processingBatches ProcessingBatch[]
+  orders            Order[]           @relation("CustomerOrders")
+  deliveries        Order[]           @relation("DriverDeliveries")
+  activityLogs      ActivityLog[]
+  teamAssignments   TeamAssignment[]
+  reports           Report[]
+  offlineSyncs      OfflineSync[]
+  qualityChecks     QualityCheck[]
+  productReviews    ProductReview[]
+  cart              Cart?
+  verifiedDrivers   DriverProfile[]   @relation("VerifiedDrivers")
+  verifiedSuppliers SupplierProfile[] @relation("VerifiedSuppliers")
+
+  @@map("Users")
+}
+
+enum UserRole {
+  SUPER_ADMIN
+  ADMIN
+  MANAGER
+  USER
+  DRIVER
+  BUYER
+  SUPPLIER
+}
+
+enum UserStatus {
+  ACTIVE
+  INACTIVE
+  SUSPENDED
+  PENDING_VERIFICATION
+}
+
+enum OnboardingStep {
+  COMPLETE
+  PENDING_CODE
+  PENDING_LOCATION
+  PENDING_PROFILE
+}
+
+// Admin/Company Management
+model Admin {
+  id               String             @id @default(cuid())
+  companyName      String
+  companyLogo      String?
+  taxId            String?
+  address          String?
+  city             String?
+  country          String?
+  phoneNumber      String?
+  email            String?
+  region           String?
+  landmark         String?
+  lat              Float?
+  lng              Float?
+  employeeCount    Int?
+  description      String?
+  tags             String[]           @default([])
+  profileCompleted Boolean            @default(false)
+  subscription     SubscriptionStatus @default(TRIAL)
+  subscriptionEnd  DateTime?
+  maxManagers      Int                @default(5)
+  maxFarms         Int                @default(10)
+  inviteCode       String?            @unique
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
+
+  // Relations
+  users            User[]            @relation("AdminManagesManager")
+  farms            Farm[]
+  integrations     Integration[]
+  supplierProfiles SupplierProfile[]
+  driverProfiles   DriverProfile[]
+}
+
+enum SubscriptionStatus {
+  TRIAL
+  ACTIVE
+  EXPIRED
+  CANCELLED
+  SUSPENDED
+}
+
+// Farm Management
+model Farm {
+  id          String     @id @default(cuid())
+  name        String
+  type        FarmType
+  description String?
+  area        Float?
+  areaUnit    String?    @default("hectares")
+  income      Float?
+  equipment   Int?
+  labor       Int?
+  output      Float?
+  expenses    Float?
+  profit      Float?
+  status      FarmStatus @default(ACTIVE)
+  location    Json? // { lat, lng, address }
+  country     String?
+  region      String?
+  city        String?
+  postalCode  String?
+
+  // Metrics
+  totalWasteCollected Float @default(0)
+  totalWasteProcessed Float @default(0)
+  totalCarbonSaved    Float @default(0)
+  totalRevenue        Float @default(0)
+  totalProductsSold   Int   @default(0)
+  // Enhanced fields
+  timezone  String    @default("Africa/Accra")
+  deletedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  adminId           String?
+  admin             Admin?            @relation(fields: [adminId], references: [id])
+  managerId         String?           @unique
+  manager           User?             @relation(fields: [managerId], references: [id])
+  wasteRecords      WasteRecord[]
+  processingBatches ProcessingBatch[]
+  products          Product[]
+  orders            Order[]
+  reports           Report[]
+}
+
+enum FarmType {
+  FAMILY_FARM
+  PROFESSIONAL_FARM
+  CORPORATE_FARM
+  COOPERATIVE_FARM
+  PERSONAL_FARM
+  COMMUNITY_FARM
+  OTHER
+}
+
+enum FarmStatus {
+  ACTIVE
+  INACTIVE
+  SUSPENDED
+  PENDING_APPROVAL
+}
+
+// Driver Profile
+model DriverProfile {
+  id                  String       @id @default(cuid())
+  userId              String       @unique
+  user                User         @relation(fields: [userId], references: [id])
+  licenseNumber       String?
+  licenseDocument     String?
+  licenseExpiry       DateTime?
+  idCardNumber        String?
+  idCardDocument      String?
+  passportNumber      String?
+  passportDocument    String?
+  vehicleType         String?
+  vehicleModel        String?
+  vehiclePlateNumber  String?
+  vehicleRegistration String?
+  vehicleDocument     String?
+  baseLocation        Json? // { lat, lng, address }
+  currentLocation     Json? // Real-time tracking
+  rating              Float        @default(5.0)
+  totalDeliveries     Int          @default(0)
+  status              DriverStatus @default(PENDING)
+  verifiedAt          DateTime?
+  // Enhanced fields
+  verifiedBy          String?
+  verifiedByUser      User?        @relation("VerifiedDrivers", fields: [verifiedBy], references: [id])
+  createdAt           DateTime     @default(now())
+  updatedAt           DateTime     @updatedAt
+  // Company association (set during onboarding)
+  adminId             String?
+  admin               Admin?       @relation(fields: [adminId], references: [id])
+}
+
+enum DriverStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  SUSPENDED
+  ACTIVE
+  OFFLINE
+}
+
+// Buyer Profile
+model BuyerProfile {
+  id                     String      @id @default(cuid())
+  userId                 String      @unique
+  user                   User        @relation(fields: [userId], references: [id])
+  companyName            String?
+  businessType           String?
+  taxId                  String?
+  taxDocument            String?
+  businessAddress        String?
+  deliveryAddress        Json?
+  preferredPaymentMethod String?
+  totalPurchases         Float       @default(0)
+  orderCount             Int         @default(0)
+  status                 BuyerStatus @default(ACTIVE)
+  verifiedAt             DateTime?
+  createdAt              DateTime    @default(now())
+  updatedAt              DateTime    @updatedAt
+}
+
+enum BuyerStatus {
+  ACTIVE
+  INACTIVE
+  SUSPENDED
+  PENDING_VERIFICATION
+}
+
+// Supplier/Farmer Profile
+model SupplierProfile {
+  id                  String         @id @default(cuid())
+  userId              String         @unique
+  user                User           @relation(fields: [userId], references: [id])
+  supplierType        String?        @default("FARMER")
+  organizationName    String?
+  farmName            String?
+  farmType            String?
+  farmSize            Float?
+  farmSizeRange       String?
+  primaryProducts     String[]
+  wasteTypes          String[]
+  crops               String[]
+  weeklyWasteAmount   Float?
+  weeklyWasteAmountRange String?
+  collectionAddress   Json?
+  preferredPickupTime String?
+  totalWasteSupplied  Float          @default(0)
+  totalEarnings       Float          @default(0)
+  pointsBalance       Int            @default(0)
+  pointsEarned        Int            @default(0)
+  rating              Float          @default(5.0)
+  status              SupplierStatus @default(PENDING)
+  verifiedAt          DateTime?
+  // Enhanced fields
+  verifiedBy          String?
+  verifiedByUser      User?          @relation("VerifiedSuppliers", fields: [verifiedBy], references: [id])
+  createdAt           DateTime       @default(now())
+  updatedAt           DateTime       @updatedAt
+  // Company association (set during onboarding)
+  adminId             String?
+  admin               Admin?         @relation(fields: [adminId], references: [id])
+}
+
+enum SupplierStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  ACTIVE
+  SUSPENDED
+}
+
+// Waste Management
+model WasteRecord {
+  id                String          @id @default(cuid())
+  sourceName        String
+  sourceType        WasteSourceType
+  quantity          Float
+  unit              String          @default("kg")
+  date              DateTime
+  status            WasteStatus     @default(PENDING)
+  description       String?
+  images            String[] // URLs
+  fileUrl           String?
+  location          Json? // { lat, lng, address }
+  processedQuantity Float?
+  processingDate    DateTime?
+  notes             String?
+
+  // Environmental metrics
+  carbonSaved      Float? // Estimated carbon saved
+  methanePrevented Float? // Methane prevented in kg CO2e
+  pointsAwarded    Int    @default(0)
+
+  // Enhanced fields
+  deletedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  farmId            String?
+  farm              Farm?            @relation(fields: [farmId], references: [id])
+  supplierId        String?
+  supplier          User?            @relation("SupplierWaste", fields: [supplierId], references: [id])
+  recordedById      String
+  recordedBy        User             @relation("RecordedWaste", fields: [recordedById], references: [id])
+  processingBatchId String?
+  processingBatch   ProcessingBatch? @relation(fields: [processingBatchId], references: [id])
+  driverId          String? // Driver who collected
+  driver            User?            @relation("DriverCollection", fields: [driverId], references: [id])
+  vehicleId         String? // Company vehicle assigned for pickup
+  vehicle           Vehicle?         @relation(fields: [vehicleId], references: [id])
+}
+
+enum WasteSourceType {
+  AGRICULTURAL
+  FOOD_WASTE
+  MARKET_WASTE
+  HOUSEHOLD
+  INDUSTRIAL
+  MUNICIPAL
+  COMMERCIAL
+  OTHER
+}
+
+enum WasteStatus {
+  PENDING
+  SCHEDULED
+  COLLECTED
+  PROCESSING
+  PROCESSED
+  ACKNOWLEDGED
+  NO_SHOW
+  CANCELLED
+  REJECTED
+}
+
+// Company Vehicle Fleet
+model Vehicle {
+  id          String        @id @default(cuid())
+  plateNumber String        @unique
+  type        String        // Tricycle, Car, Van, Truck, Motorcycle
+  model       String?
+  color       String?
+  isActive    Boolean       @default(true)
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  wasteRecords WasteRecord[]
+}
+
+// Processing Batch Management
+model ProcessingBatch {
+  id          String      @id @default(cuid())
+  batchNumber String      @unique
+  name        String?
+  startDate   DateTime
+  endDate     DateTime?
+  processType ProcessType
+  quantity    Float // Input quantity
+  status      BatchStatus @default(PENDING)
+
+  // Processing parameters
+  temperature     Float? // Celsius
+  materialLevel   Float? // Percentage
+  moistureContent Float? // Percentage
+  phLevel         Float?
+  c02Level        Float? // ppm
+
+  // Output metrics
+  liquidOutput         Float?
+  liquidOutputUnit     String? @default("liters")
+  larvaeOutput         Float?  // BSF larvae harvested in kg
+  larvaeOutputUnit     String? @default("kg")
+  fertilizerOutput     Float?
+  fertilizerOutputUnit String? @default("kg")
+  gasOutput            Float? // Biogas in m³
+  gasOutputUnit        String? @default("m³")
+
+  // Efficiency metrics
+  conversionRate       Float? // Percentage
+  processingEfficiency Float? // Percentage
+  qualityScore         Float? // 0–10 quality rating
+  notes  String?
+  images String[]
+
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  completedAt DateTime?
+
+  // Relations
+  farmId          String?
+  farm            Farm?            @relation(fields: [farmId], references: [id])
+  createdById     String
+  createdBy       User             @relation(fields: [createdById], references: [id])
+  wasteRecords    WasteRecord[]
+  teamAssignments TeamAssignment[]
+  activityLogs    ActivityLog[]
+  qualityChecks   QualityCheck[]
+}
+
+enum ProcessType {
+  COMPOSTING
+  ANAEROBIC_DIGESTION
+  VERMICOMPOSTING
+  BSF_LARVAE_PROCESSING
+  BLACK_SOLDIER_FLY
+  FERMENTATION
+  DRYING
+  PELLETIZING
+  OTHER
+}
+
+enum BatchStatus {
+  PLANNED
+  PENDING
+  ACTIVE
+  PAUSED
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+// Quality Control
+model QualityCheck {
+  id           String          @id @default(cuid())
+  batchId      String
+  batch        ProcessingBatch @relation(fields: [batchId], references: [id])
+  checkType    QualityType
+  parameter    String
+  value        Float
+  unit         String
+  minThreshold Float?
+  maxThreshold Float?
+  passed       Boolean
+  notes        String?
+  checkedById  String
+  checkedBy    User            @relation(fields: [checkedById], references: [id])
+  checkedAt    DateTime        @default(now())
+}
+
+enum QualityType {
+  TEMPERATURE
+  PH
+  MOISTURE
+  NUTRIENT_CONTENT
+  PATHOGEN_TEST
+  HEAVY_METAL
+  ODOR
+  APPEARANCE
+  OTHER
+}
+
+// Team Assignment
+model TeamAssignment {
+  id           String          @id @default(cuid())
+  batchId      String
+  batch        ProcessingBatch @relation(fields: [batchId], references: [id])
+  teamMemberId String
+  teamMember   User            @relation(fields: [teamMemberId], references: [id])
+  role         String
+  shift        String?
+  assignedAt   DateTime        @default(now())
+  endedAt      DateTime?
+}
+
+// Activity Logging
+model ActivityLog {
+  id            String          @id @default(cuid())
+  batchId       String
+  batch         ProcessingBatch @relation(fields: [batchId], references: [id])
+  action        ActivityAction
+  description   String?
+  metadata      Json?
+  performedById String
+  performedBy   User            @relation(fields: [performedById], references: [id])
+  timestamp     DateTime        @default(now())
+}
+
+enum ActivityAction {
+  BATCH_STARTED
+  BATCH_PAUSED
+  BATCH_RESUMED
+  BATCH_COMPLETED
+  TEMPERATURE_CHANGED
+  MATERIAL_ADDED
+  OUTPUT_RECORDED
+  QUALITY_CHECKED
+  TEAM_ASSIGNED
+  NOTE_ADDED
+  IMAGE_UPLOADED
+}
+
+// Product Management
+model Product {
+  id               String          @id @default(cuid())
+  name             String
+  description      String?
+  shortDescription String?
+  images           String[]
+  category         ProductCategory
+  status           ProductStatus   @default(ACTIVE)
+  featured         Boolean         @default(false)
+  tags             String[]
+
+  // SEO
+  slug            String  @unique
+  metaTitle       String?
+  metaDescription String?
+
+  // Enhanced fields
+  averageRating   Float   @default(0)
+  reviewCount     Int     @default(0)
+  deletedAt       DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  farmId   String?
+  farm     Farm?            @relation(fields: [farmId], references: [id])
+  variants ProductVariant[]
+  reviews  ProductReview[]
+}
+
+enum ProductCategory {
+  ORGANIC_FERTILIZER
+  PROTEIN_FEED
+  INSECT_OIL
+  SOIL_CONDITIONER
+  DRIED_LARVAE
+  COMPOST
+  LIQUID_FERTILIZER
+  BIOCHAR
+  OTHER
+}
+
+enum ProductStatus {
+  ACTIVE
+  INACTIVE
+  OUT_OF_STOCK
+  DISCONTINUED
+}
+
+model ProductVariant {
+  id               String   @id @default(cuid())
+  productId        String
+  product          Product  @relation(fields: [productId], references: [id])
+  name             String
+  sku              String   @unique
+  quantity         Int
+  price            Float
+  comparePrice     Float? // Original price for sale
+  cost             Float? // Cost price
+  unitType         String
+  unitValue        Float? // e.g., 25 for 25kg bag
+  minOrderQuantity Int      @default(1)
+  maxOrderQuantity Int?
+  weight           Float? // kg
+  dimensions       Json? // { length, width, height }
+  images           String[]
+  isActive         Boolean  @default(true)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  // Relations
+  orderItems OrderItem[]
+  cartItems  CartItem[]
+}
+
+model ProductReview {
+  id        String   @id @default(cuid())
+  productId String
+  product   Product  @relation(fields: [productId], references: [id])
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  rating    Int // 1-5
+  title     String?
+  comment   String?
+  images    String[]
+  verified  Boolean  @default(false)
+  helpful   Int      @default(0)
+  createdAt DateTime @default(now())
+}
+
+// Order Management
+model Order {
+  id                   String        @id @default(cuid())
+  orderNumber          String        @unique
+  customerId           String
+  customer             User          @relation("CustomerOrders", fields: [customerId], references: [id])
+  status               OrderStatus   @default(PENDING)
+  subtotal             Float
+  tax                  Float         @default(0)
+  shippingCost         Float         @default(0)
+  discount             Float         @default(0)
+  total                Float
+  paymentMethod        PaymentMethod
+  paymentStatus        PaymentStatus @default(PENDING)
+  paymentDetails       Json?
+  deliveryAddress      Json
+  deliveryInstructions String?
+  specialInstructions  String?
+
+  // Tracking
+  trackingNumber     String?
+  estimatedDelivery  DateTime?
+  deliveredAt        DateTime?
+  cancelledAt        DateTime?
+  cancellationReason String?
+  // Enhanced fields
+  paidAt             DateTime?
+  refundReason       String?
+  deletedAt          DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  items    OrderItem[]
+  driverId String?
+  driver   User?       @relation("DriverDeliveries", fields: [driverId], references: [id])
+  farmId   String?
+  farm     Farm?       @relation(fields: [farmId], references: [id])
+  invoice  Invoice?
+  shipment Shipment?
+}
+
+enum OrderStatus {
+  PENDING
+  CONFIRMED
+  PROCESSING
+  READY_FOR_PICKUP
+  SHIPPED
+  OUT_FOR_DELIVERY
+  DELIVERED
+  COMPLETED
+  CANCELLED
+  REFUNDED
+  ON_HOLD
+}
+
+enum PaymentMethod {
+  CASH_ON_DELIVERY
+  MOBILE_MONEY
+  BANK_TRANSFER
+  CREDIT_CARD
+  DEBIT_CARD
+  PAYPAL
+  STRIPE
+  OTHER
+}
+
+enum PaymentStatus {
+  PENDING
+  PAID
+  FAILED
+  REFUNDED
+  PARTIALLY_REFUNDED
+}
+
+model OrderItem {
+  id        String         @id @default(cuid())
+  orderId   String
+  order     Order          @relation(fields: [orderId], references: [id])
+  variantId String
+  variant   ProductVariant @relation(fields: [variantId], references: [id])
+  quantity  Int
+  price     Float // Price at time of order
+  subtotal  Float
+  metadata  Json?
+}
+
+model Invoice {
+  id            String        @id @default(cuid())
+  orderId       String        @unique
+  order         Order         @relation(fields: [orderId], references: [id])
+  invoiceNumber String        @unique
+  issueDate     DateTime      @default(now())
+  dueDate       DateTime
+  paidAt        DateTime?
+  pdfUrl        String?
+  status        InvoiceStatus @default(ISSUED)
+}
+
+enum InvoiceStatus {
+  ISSUED
+  SENT
+  PAID
+  OVERDUE
+  CANCELLED
+}
+
+model Shipment {
+  id                String         @id @default(cuid())
+  orderId           String         @unique
+  order             Order          @relation(fields: [orderId], references: [id])
+  carrier           String
+  trackingNumber    String         @unique
+  trackingUrl       String?
+  labelUrl          String?
+  status            ShipmentStatus @default(PENDING)
+  shippedAt         DateTime?
+  estimatedDelivery DateTime?
+  deliveredAt       DateTime?
+  currentLocation   Json?
+  events            Json[] // Tracking history
+}
+
+enum ShipmentStatus {
+  PENDING
+  LABEL_CREATED
+  PICKED_UP
+  IN_TRANSIT
+  OUT_FOR_DELIVERY
+  DELIVERED
+  FAILED
+  RETURNED
+}
+
+// Shopping Cart (for mobile app)
+model Cart {
+  id        String     @id @default(cuid())
+  userId    String     @unique
+  user      User       @relation(fields: [userId], references: [id])
+  items     CartItem[]
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+}
+
+model CartItem {
+  id        String         @id @default(cuid())
+  cartId    String
+  cart      Cart           @relation(fields: [cartId], references: [id])
+  variantId String
+  variant   ProductVariant @relation(fields: [variantId], references: [id])
+  quantity  Int
+  addedAt   DateTime       @default(now())
+}
+
+// Notifications
+model Notification {
+  id        String           @id @default(cuid())
+  userId    String
+  user      User             @relation(fields: [userId], references: [id])
+  title     String
+  message   String
+  type      NotificationType
+  read      Boolean          @default(false)
+  readAt    DateTime?
+  metadata  Json?
+  createdAt DateTime         @default(now())
+}
+
+enum NotificationType {
+  INFO
+  SUCCESS
+  WARNING
+  ERROR
+  ALERT
+  ORDER_UPDATE
+  WASTE_COLLECTION
+  BATCH_UPDATE
+  PAYMENT_CONFIRMED
+  DELIVERY_UPDATE
+  SYSTEM_ALERT
+}
+
+// Offline Sync Support
+model OfflineSync {
+  id           String     @id @default(cuid())
+  userId       String
+  user         User       @relation(fields: [userId], references: [id])
+  action       String // CREATE, UPDATE, DELETE
+  entityType   String // WasteRecord, ProcessingBatch, etc.
+  entityId     String?
+  data         Json
+  status       SyncStatus @default(PENDING)
+  retryCount   Int        @default(0)
+  errorMessage String?
+  createdAt    DateTime   @default(now())
+  syncedAt     DateTime?
+  processedAt  DateTime?
+}
+
+enum SyncStatus {
+  PENDING
+  SYNCED
+  FAILED
+  CONFLICT
+}
+
+// Reports and Analytics
+model Report {
+  id          String     @id @default(cuid())
+  type        ReportType
+  title       String
+  description String?
+  fileUrl     String?
+  data        Json // Report data in JSON
+  parameters  Json? // Report parameters
+  generatedBy String
+  generator   User       @relation(fields: [generatedBy], references: [id])
+  farmId      String?
+  farm        Farm?      @relation(fields: [farmId], references: [id])
+  generatedAt DateTime   @default(now())
+  expiresAt   DateTime?
+}
+
+enum ReportType {
+  WASTE_SUMMARY
+  PROCESSING_EFFICIENCY
+  FINANCIAL_REPORT
+  CARBON_SAVINGS
+  PRODUCT_SALES
+  FARM_PERFORMANCE
+  DRIVER_PERFORMANCE
+  CUSTOMER_ANALYTICS
+  INVENTORY_REPORT
+  QUALITY_REPORT
+}
+
+// API Keys for Integrations
+model Integration {
+  id        String            @id @default(cuid())
+  adminId   String
+  admin     Admin             @relation(fields: [adminId], references: [id])
+  name      String
+  type      IntegrationType
+  apiKey    String            @unique
+  apiSecret String?
+  config    Json?
+  status    IntegrationStatus @default(ACTIVE)
+  lastUsed  DateTime?
+  createdAt DateTime          @default(now())
+  updatedAt DateTime          @updatedAt
+}
+
+enum IntegrationType {
+  CARBON_API
+  PAYMENT_GATEWAY
+  SMS_GATEWAY
+  EMAIL_SERVICE
+  MAP_SERVICE
+  IOT_DEVICE
+  ERP_SYSTEM
+  OTHER
+}
+
+enum IntegrationStatus {
+  ACTIVE
+  INACTIVE
+  ERROR
+  PENDING
+}
+
+// System Settings
+model SystemSetting {
+  id          String   @id @default(cuid())
+  key         String   @unique
+  value       Json
+  description String?
+  category    String
+  updatedBy   String
+  updatedAt   DateTime @updatedAt
+}

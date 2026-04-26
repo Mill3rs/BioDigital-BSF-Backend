@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Order Confirmation - BioDigital BSF</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+      line-height: 1.6;
+      color: #333;
+      background-color: #f5f5f5;
+    }
+    
+    .container {
+      max-width: 600px;
+      margin: 0 auto;
+      background-color: #ffffff;
+      border-radius: 12px;
+      overflow: hidden;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+    }
+    
+    .header {
+      background: linear-gradient(135deg, #2196F3 0%, #21CBF3 100%);
+      color: white;
+      padding: 40px 30px;
+      text-align: center;
+    }
+    
+    .icon {
+      font-size: 48px;
+      margin-bottom: 10px;
+    }
+    
+    .header h1 {
+      font-size: 28px;
+      margin-bottom: 10px;
+      font-weight: 600;
+    }
+    
+    .order-number {
+      font-size: 18px;
+      opacity: 0.9;
+      font-family: monospace;
+    }
+    
+    .content {
+      padding: 40px 30px;
+    }
+    
+    .greeting {
+      font-size: 18px;
+      margin-bottom: 20px;
+      color: #2196F3;
+      font-weight: 600;
+    }
+    
+    .success-badge {
+      background-color: #4CAF50;
+      color: white;
+      padding: 8px 16px;
+      border-radius: 20px;
+      display: inline-block;
+      font-size: 14px;
+      font-weight: 600;
+      margin-bottom: 20px;
+    }
+    
+    .order-summary {
+      background-color: #f9f9f9;
+      border-radius: 8px;
+      padding: 20px;
+      margin: 20px 0;
+    }
+    
+    .summary-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 10px 0;
+      border-bottom: 1px solid #e0e0e0;
+    }
+    
+    .summary-row:last-child {
+      border-bottom: none;
+    }
+    
+    .summary-label {
+      font-weight: 600;
+      color: #555;
+    }
+    
+    .summary-value {
+      color: #333;
+    }
+    
+    .total-row {
+      font-size: 18px;
+      font-weight: 700;
+      color: #2196F3;
+      padding-top: 15px;
+      margin-top: 10px;
+      border-top: 2px solid #e0e0e0;
+    }
+    
+    .items-table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 20px 0;
+    }
+    
+    .items-table th {
+      text-align: left;
+      padding: 12px;
+      background-color: #f5f5f5;
+      font-weight: 600;
+      color: #555;
+    }
+    
+    .items-table td {
+      padding: 12px;
+      border-bottom: 1px solid #e0e0e0;
+    }
+    
+    .delivery-info {
+      background-color: #E3F2FD;
+      padding: 20px;
+      border-radius: 8px;
+      margin: 20px 0;
+    }
+    
+    .delivery-info h3 {
+      color: #2196F3;
+      margin-bottom: 10px;
+      font-size: 16px;
+    }
+    
+    .button {
+      display: inline-block;
+      background-color: #2196F3;
+      color: white;
+      text-decoration: none;
+      padding: 14px 32px;
+      border-radius: 8px;
+      font-weight: 600;
+      margin: 20px 0;
+      transition: background-color 0.3s;
+    }
+    
+    .button:hover {
+      background-color: #1976D2;
+    }
+    
+    .next-steps {
+      background-color: #E8F5E9;
+      padding: 20px;
+      border-radius: 8px;
+      margin: 30px 0;
+      border-left: 4px solid #4CAF50;
+    }
+    
+    .next-steps h3 {
+      color: #2E7D32;
+      margin-bottom: 10px;
+    }
+    
+    .footer {
+      background-color: #f5f5f5;
+      padding: 30px;
+      text-align: center;
+      font-size: 12px;
+      color: #999;
+      border-top: 1px solid #e0e0e0;
+    }
+    
+    .footer a {
+      color: #2196F3;
+      text-decoration: none;
+    }
+    
+    @media (max-width: 480px) {
+      .content {
+        padding: 30px 20px;
+      }
+      
+      .header {
+        padding: 30px 20px;
+      }
+      
+      .items-table {
+        font-size: 14px;
+      }
+      
+      .items-table th,
+      .items-table td {
+        padding: 8px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <div class="icon">✅</div>
+      <h1>Order Confirmed!</h1>
+      <div class="order-number">Order #{{orderNumber}}</div>
+    </div>
+    
+    <div class="content">
+      <div class="greeting">
+        Hello {{customerName}},
+      </div>
+      
+      <div style="text-align: center;">
+        <div class="success-badge">✓ Payment Confirmed</div>
+      </div>
+      
+      <div class="message">
+        <p>Thank you for your order! We're pleased to confirm that your order has been received and is being processed.</p>
+      </div>
+      
+      <div class="order-summary">
+        <div class="summary-row">
+          <span class="summary-label">Order Date:</span>
+          <span class="summary-value">{{orderDate}}</span>
+        </div>
+        <div class="summary-row">
+          <span class="summary-label">Order Status:</span>
+          <span class="summary-value">{{orderStatus}}</span>
+        </div>
+        <div class="summary-row">
+          <span class="summary-label">Payment Method:</span>
+          <span class="summary-value">{{paymentMethod}}</span>
+        </div>
+        <div class="summary-row">
+          <span class="summary-label">Payment Status:</span>
+          <span class="summary-value">{{paymentStatus}}</span>
+        </div>
+      </div>
+      
+      <h3 style="margin: 20px 0 10px;">Order Items</h3>
+      <table class="items-table">
+        <thead>
+          <tr>
+            <th>Item</th>
+            <th>Quantity</th>
+            <th>Price</th>
+            <th>Subtotal</th>
+          </tr>
+        </thead>
+        <tbody>
+          {{#each items}}
+          <tr>
+            <td>{{this.name}}</td>
+            <td>{{this.quantity}}</td>
+            <td>${{this.price}}</td>
+            <td>${{this.subtotal}}</td>
+          </tr>
+          {{/each}}
+        </tbody>
+      </table>
+      
+      <div class="order-summary">
+        <div class="summary-row">
+          <span class="summary-label">Subtotal:</span>
+          <span class="summary-value">${{subtotal}}</span>
+        </div>
+        <div class="summary-row">
+          <span class="summary-label">Shipping:</span>
+          <span class="summary-value">${{shippingCost}}</span>
+        </div>
+        <div class="summary-row">
+          <span class="summary-label">Tax:</span>
+          <span class="summary-value">${{tax}}</span>
+        </div>
+        <div class="summary-row total-row">
+          <span class="summary-label">Total:</span>
+          <span class="summary-value">${{total}}</span>
+        </div>
+      </div>
+      
+      <div class="delivery-info">
+        <h3>📦 Delivery Address</h3>
+        <p>
+          {{deliveryAddress.street}}<br>
+          {{deliveryAddress.city}}, {{deliveryAddress.region}}<br>
+          {{deliveryAddress.country}} - {{deliveryAddress.postalCode}}
+        </p>
+        {{#if deliveryInstructions}}
+        <p><strong>Delivery Instructions:</strong> {{deliveryInstructions}}</p>
+        {{/if}}
+      </div>
+      
+      <div class="next-steps">
+        <h3>📋 What's Next?</h3>
+        <ul>
+          <li>We'll notify you when your order is ready for shipment</li>
+          <li>Track your order status in real-time from your dashboard</li>
+          <li>Contact support if you have any questions about your order</li>
+        </ul>
+      </div>
+      
+      <div style="text-align: center;">
+        <a href="{{trackingUrl}}" class="button">Track Your Order</a>
+      </div>
+      
+      <div class="message" style="margin-top: 30px;">
+        <p>Need assistance? Contact our customer support at <a href="mailto:orders@biodigital.com" style="color: #2196F3;">orders@biodigital.com</a></p>
+      </div>
+    </div>
+    
+    <div class="footer">
+      <p>&copy; 2024 BioDigital BSF. All rights reserved.</p>
+      <p style="margin-top: 10px;">
+        <a href="{{unsubscribeUrl}}">Unsubscribe</a> | 
+        <a href="{{privacyUrl}}">Privacy Policy</a>
+      </p>
+    </div>
+  </div>
+</body>
+</html>

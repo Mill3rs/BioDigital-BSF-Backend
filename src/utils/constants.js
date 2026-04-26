@@ -1,0 +1,334 @@
+// User Roles
+const USER_ROLES = {
+  SUPER_ADMIN: 'SUPER_ADMIN',
+  ADMIN: 'ADMIN',
+  MANAGER: 'MANAGER',
+  DRIVER: 'DRIVER',
+  BUYER: 'BUYER',
+  SUPPLIER: 'SUPPLIER'
+};
+
+// User Status
+const USER_STATUS = {
+  ACTIVE: 'ACTIVE',
+  INACTIVE: 'INACTIVE',
+  SUSPENDED: 'SUSPENDED',
+  PENDING_VERIFICATION: 'PENDING_VERIFICATION',
+  DELETED: 'DELETED'
+};
+
+// Farm Types
+const FARM_TYPES = {
+  FAMILY_FARM: 'FAMILY_FARM',
+  PROFESSIONAL_FARM: 'PROFESSIONAL_FARM',
+  CORPORATE_FARM: 'CORPORATE_FARM',
+  COOPERATIVE_FARM: 'COOPERATIVE_FARM',
+  PERSONAL_FARM: 'PERSONAL_FARM',
+  COMMUNITY_FARM: 'COMMUNITY_FARM',
+  OTHER: 'OTHER'
+};
+
+// Farm Status
+const FARM_STATUS = {
+  ACTIVE: 'ACTIVE',
+  INACTIVE: 'INACTIVE',
+  SUSPENDED: 'SUSPENDED',
+  PENDING_APPROVAL: 'PENDING_APPROVAL'
+};
+
+// Waste Source Types
+const WASTE_SOURCE_TYPES = {
+  AGRICULTURAL: 'AGRICULTURAL',
+  FOOD_WASTE: 'FOOD_WASTE',
+  MARKET_WASTE: 'MARKET_WASTE',
+  HOUSEHOLD: 'HOUSEHOLD',
+  INDUSTRIAL: 'INDUSTRIAL',
+  MUNICIPAL: 'MUNICIPAL',
+  COMMERCIAL: 'COMMERCIAL',
+  OTHER: 'OTHER'
+};
+
+// Waste Status
+const WASTE_STATUS = {
+  PENDING: 'PENDING',
+  SCHEDULED: 'SCHEDULED',
+  COLLECTED: 'COLLECTED',
+  PROCESSING: 'PROCESSING',
+  PROCESSED: 'PROCESSED',
+  CANCELLED: 'CANCELLED',
+  REJECTED: 'REJECTED'
+};
+
+// Process Types
+const PROCESS_TYPES = {
+  COMPOSTING: 'COMPOSTING',
+  ANAEROBIC_DIGESTION: 'ANAEROBIC_DIGESTION',
+  VERMICOMPOSTING: 'VERMICOMPOSTING',
+  BSF_LARVAE_PROCESSING: 'BSF_LARVAE_PROCESSING',
+  BLACK_SOLDIER_FLY: 'BLACK_SOLDIER_FLY',
+  FERMENTATION: 'FERMENTATION',
+  DRYING: 'DRYING',
+  PELLETIZING: 'PELLETIZING',
+  OTHER: 'OTHER'
+};
+
+// Batch Status
+const BATCH_STATUS = {
+  PLANNED: 'PLANNED',
+  PENDING: 'PENDING',
+  ACTIVE: 'ACTIVE',
+  PAUSED: 'PAUSED',
+  COMPLETED: 'COMPLETED',
+  FAILED: 'FAILED',
+  CANCELLED: 'CANCELLED'
+};
+
+// Order Status
+const ORDER_STATUS = {
+  PENDING: 'PENDING',
+  CONFIRMED: 'CONFIRMED',
+  PROCESSING: 'PROCESSING',
+  READY_FOR_PICKUP: 'READY_FOR_PICKUP',
+  SHIPPED: 'SHIPPED',
+  OUT_FOR_DELIVERY: 'OUT_FOR_DELIVERY',
+  DELIVERED: 'DELIVERED',
+  COMPLETED: 'COMPLETED',
+  CANCELLED: 'CANCELLED',
+  REFUNDED: 'REFUNDED',
+  ON_HOLD: 'ON_HOLD'
+};
+
+// Payment Methods
+const PAYMENT_METHODS = {
+  CASH_ON_DELIVERY: 'CASH_ON_DELIVERY',
+  MOBILE_MONEY: 'MOBILE_MONEY',
+  BANK_TRANSFER: 'BANK_TRANSFER',
+  CREDIT_CARD: 'CREDIT_CARD',
+  DEBIT_CARD: 'DEBIT_CARD',
+  PAYPAL: 'PAYPAL',
+  STRIPE: 'STRIPE',
+  OTHER: 'OTHER'
+};
+
+// Payment Status
+const PAYMENT_STATUS = {
+  PENDING: 'PENDING',
+  PAID: 'PAID',
+  FAILED: 'FAILED',
+  REFUNDED: 'REFUNDED',
+  PARTIALLY_REFUNDED: 'PARTIALLY_REFUNDED'
+};
+
+// Product Categories
+const PRODUCT_CATEGORIES = {
+  ORGANIC_FERTILIZER: 'ORGANIC_FERTILIZER',
+  PROTEIN_FEED: 'PROTEIN_FEED',
+  INSECT_OIL: 'INSECT_OIL',
+  SOIL_CONDITIONER: 'SOIL_CONDITIONER',
+  DRIED_LARVAE: 'DRIED_LARVAE',
+  COMPOST: 'COMPOST',
+  LIQUID_FERTILIZER: 'LIQUID_FERTILIZER',
+  BIOCHAR: 'BIOCHAR',
+  OTHER: 'OTHER'
+};
+
+// Product Status
+const PRODUCT_STATUS = {
+  ACTIVE: 'ACTIVE',
+  INACTIVE: 'INACTIVE',
+  OUT_OF_STOCK: 'OUT_OF_STOCK',
+  DISCONTINUED: 'DISCONTINUED'
+};
+
+// Notification Types
+const NOTIFICATION_TYPES = {
+  INFO: 'INFO',
+  SUCCESS: 'SUCCESS',
+  WARNING: 'WARNING',
+  ERROR: 'ERROR',
+  ALERT: 'ALERT',
+  ORDER_UPDATE: 'ORDER_UPDATE',
+  WASTE_COLLECTION: 'WASTE_COLLECTION',
+  BATCH_UPDATE: 'BATCH_UPDATE',
+  PAYMENT_CONFIRMED: 'PAYMENT_CONFIRMED',
+  DELIVERY_UPDATE: 'DELIVERY_UPDATE',
+  SYSTEM_ALERT: 'SYSTEM_ALERT'
+};
+
+// Report Types
+const REPORT_TYPES = {
+  WASTE_SUMMARY: 'WASTE_SUMMARY',
+  PROCESSING_EFFICIENCY: 'PROCESSING_EFFICIENCY',
+  FINANCIAL_REPORT: 'FINANCIAL_REPORT',
+  CARBON_SAVINGS: 'CARBON_SAVINGS',
+  PRODUCT_SALES: 'PRODUCT_SALES',
+  FARM_PERFORMANCE: 'FARM_PERFORMANCE',
+  DRIVER_PERFORMANCE: 'DRIVER_PERFORMANCE',
+  CUSTOMER_ANALYTICS: 'CUSTOMER_ANALYTICS',
+  INVENTORY_REPORT: 'INVENTORY_REPORT',
+  QUALITY_REPORT: 'QUALITY_REPORT'
+};
+
+// Sync Status
+const SYNC_STATUS = {
+  PENDING: 'PENDING',
+  SYNCED: 'SYNCED',
+  FAILED: 'FAILED',
+  CONFLICT: 'CONFLICT'
+};
+
+// Subscription Status
+const SUBSCRIPTION_STATUS = {
+  TRIAL: 'TRIAL',
+  ACTIVE: 'ACTIVE',
+  EXPIRED: 'EXPIRED',
+  CANCELLED: 'CANCELLED',
+  SUSPENDED: 'SUSPENDED'
+};
+
+// Driver Status
+const DRIVER_STATUS = {
+  PENDING: 'PENDING',
+  APPROVED: 'APPROVED',
+  REJECTED: 'REJECTED',
+  ACTIVE: 'ACTIVE',
+  OFFLINE: 'OFFLINE',
+  SUSPENDED: 'SUSPENDED'
+};
+
+// HTTP Status Codes
+const HTTP_STATUS = {
+  OK: 200,
+  CREATED: 201,
+  ACCEPTED: 202,
+  NO_CONTENT: 204,
+  BAD_REQUEST: 400,
+  UNAUTHORIZED: 401,
+  FORBIDDEN: 403,
+  NOT_FOUND: 404,
+  CONFLICT: 409,
+  UNPROCESSABLE_ENTITY: 422,
+  TOO_MANY_REQUESTS: 429,
+  INTERNAL_SERVER_ERROR: 500,
+  BAD_GATEWAY: 502,
+  SERVICE_UNAVAILABLE: 503
+};
+
+// Error Messages
+const ERROR_MESSAGES = {
+  // Authentication errors
+  TOKEN_EXPIRED: 'Token has expired. Please login again.',
+  TOKEN_INVALID: 'Invalid token. Please login again.',
+  UNAUTHORIZED: 'Unauthorized access. Please login.',
+  FORBIDDEN: 'You do not have permission to access this resource.',
+  
+  // User errors
+  USER_NOT_FOUND: 'User not found.',
+  USER_EXISTS: 'User already exists.',
+  INVALID_CREDENTIALS: 'Invalid email or password.',
+  ACCOUNT_SUSPENDED: 'Account has been suspended. Please contact support.',
+  ACCOUNT_INACTIVE: 'Account is inactive. Please verify your email.',
+  
+  // Farm errors
+  FARM_NOT_FOUND: 'Farm not found.',
+  FARM_EXISTS: 'Farm already exists.',
+  
+  // Waste errors
+  WASTE_NOT_FOUND: 'Waste record not found.',
+  INSUFFICIENT_QUANTITY: 'Insufficient quantity available.',
+  
+  // Order errors
+  ORDER_NOT_FOUND: 'Order not found.',
+  ORDER_CANNOT_CANCEL: 'Order cannot be cancelled at this stage.',
+  INSUFFICIENT_STOCK: 'Insufficient stock for product.',
+  
+  // Validation errors
+  VALIDATION_ERROR: 'Validation error.',
+  INVALID_INPUT: 'Invalid input provided.',
+  
+  // Server errors
+  INTERNAL_ERROR: 'Internal server error. Please try again later.',
+  DATABASE_ERROR: 'Database error. Please try again later.'
+};
+
+// Success Messages
+const SUCCESS_MESSAGES = {
+  CREATED: 'Resource created successfully.',
+  UPDATED: 'Resource updated successfully.',
+  DELETED: 'Resource deleted successfully.',
+  LOGIN_SUCCESS: 'Login successful.',
+  REGISTRATION_SUCCESS: 'Registration successful.',
+  ORDER_CREATED: 'Order created successfully.',
+  PAYMENT_SUCCESS: 'Payment processed successfully.'
+};
+
+// Cache Keys
+const CACHE_KEYS = {
+  USER_SESSION: (userId) => `user:session:${userId}`,
+  FARM_DATA: (farmId) => `farm:data:${farmId}`,
+  PRODUCT_LIST: (filters) => `products:list:${JSON.stringify(filters)}`,
+  ORDER_DATA: (orderId) => `order:data:${orderId}`,
+  WASTE_STATS: (farmId) => `waste:stats:${farmId}`,
+  NOTIFICATION_COUNT: (userId) => `notification:count:${userId}`
+};
+
+// Cache TTL (seconds)
+const CACHE_TTL = {
+  SHORT: 60,           // 1 minute
+  MEDIUM: 300,         // 5 minutes
+  LONG: 3600,          // 1 hour
+  VERY_LONG: 86400     // 24 hours
+};
+
+// File Upload Limits
+const FILE_UPLOAD = {
+  MAX_SIZE: 5 * 1024 * 1024,  // 5MB
+  ALLOWED_IMAGES: ['image/jpeg', 'image/png', 'image/jpg', 'image/webp'],
+  ALLOWED_DOCUMENTS: ['application/pdf', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'],
+  MAX_FILES: 10
+};
+
+// Pagination Defaults
+const PAGINATION = {
+  DEFAULT_PAGE: 1,
+  DEFAULT_LIMIT: 20,
+  MAX_LIMIT: 100
+};
+
+// Date Formats
+const DATE_FORMATS = {
+  DEFAULT: 'YYYY-MM-DD HH:mm:ss',
+  DATE_ONLY: 'YYYY-MM-DD',
+  TIME_ONLY: 'HH:mm:ss',
+  API: 'YYYY-MM-DDTHH:mm:ss.SSSZ',
+  HUMAN: 'MMMM Do YYYY, h:mm:ss a'
+};
+
+module.exports = {
+  USER_ROLES,
+  USER_STATUS,
+  FARM_TYPES,
+  FARM_STATUS,
+  WASTE_SOURCE_TYPES,
+  WASTE_STATUS,
+  PROCESS_TYPES,
+  BATCH_STATUS,
+  ORDER_STATUS,
+  PAYMENT_METHODS,
+  PAYMENT_STATUS,
+  PRODUCT_CATEGORIES,
+  PRODUCT_STATUS,
+  NOTIFICATION_TYPES,
+  REPORT_TYPES,
+  SYNC_STATUS,
+  SUBSCRIPTION_STATUS,
+  DRIVER_STATUS,
+  HTTP_STATUS,
+  ERROR_MESSAGES,
+  SUCCESS_MESSAGES,
+  CACHE_KEYS,
+  CACHE_TTL,
+  FILE_UPLOAD,
+  PAGINATION,
+  DATE_FORMATS
+};

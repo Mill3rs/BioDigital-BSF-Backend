@@ -1,0 +1,57 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: biodigital-postgres
+    environment:
+      POSTGRES_DB: biodigital
+      POSTGRES_USER: biodigital
+      POSTGRES_PASSWORD: biodigital123
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - biodigital-network
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: biodigital-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - biodigital-network
+    restart: unless-stopped
+
+  backend:
+    build: .
+    container_name: biodigital-backend
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://biodigital:biodigital123@postgres:5432/biodigital
+      REDIS_URL: redis://redis:6379
+    ports:
+      - "3000:3000"
+    depends_on:
+      - postgres
+      - redis
+    volumes:
+      - uploads:/app/uploads
+      - logs:/app/logs
+    networks:
+      - biodigital-network
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+  uploads:
+  logs:
+
+networks:
+  biodigital-network:
+    driver: bridge

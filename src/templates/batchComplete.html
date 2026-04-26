@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Batch Processing Complete - BioDigital BSF</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+      line-height: 1.6;
+      color: #333;
+      background-color: #f5f5f5;
+    }
+    
+    .container {
+      max-width: 600px;
+      margin: 0 auto;
+      background-color: #ffffff;
+      border-radius: 12px;
+      overflow: hidden;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+    }
+    
+    .header {
+      background: linear-gradient(135deg, #9C27B0 0%, #E040FB 100%);
+      color: white;
+      padding: 40px 30px;
+      text-align: center;
+    }
+    
+    .icon {
+      font-size: 48px;
+      margin-bottom: 10px;
+    }
+    
+    .header h1 {
+      font-size: 28px;
+      margin-bottom: 10px;
+      font-weight: 600;
+    }
+    
+    .batch-number {
+      font-size: 18px;
+      opacity: 0.9;
+      font-family: monospace;
+    }
+    
+    .content {
+      padding: 40px 30px;
+    }
+    
+    .greeting {
+      font-size: 18px;
+      margin-bottom: 20px;
+      color: #9C27B0;
+      font-weight: 600;
+    }
+    
+    .completion-badge {
+      background-color: #4CAF50;
+      color: white;
+      padding: 8px 16px;
+      border-radius: 20px;
+      display: inline-block;
+      font-size: 14px;
+      font-weight: 600;
+      margin-bottom: 20px;
+    }
+    
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 15px;
+      margin: 25px 0;
+    }
+    
+    .stat-card {
+      background: linear-gradient(135deg, #F3E5F5 0%, #E1BEE7 100%);
+      padding: 20px;
+      border-radius: 12px;
+      text-align: center;
+    }
+    
+    .stat-value {
+      font-size: 28px;
+      font-weight: 700;
+      color: #6A1B9A;
+      margin-bottom: 5px;
+    }
+    
+    .stat-label {
+      font-size: 13px;
+      color: #666;
+    }
+    
+    .batch-details {
+      background-color: #f9f9f9;
+      border-radius: 8px;
+      padding: 20px;
+      margin: 20px 0;
+    }
+    
+    .detail-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 10px 0;
+      border-bottom: 1px solid #e0e0e0;
+    }
+    
+    .detail-row:last-child {
+      border-bottom: none;
+    }
+    
+    .detail-label {
+      font-weight: 600;
+      color: #555;
+    }
+    
+    .detail-value {
+      color: #333;
+    }
+    
+    .efficiency-meter {
+      background-color: #E0E0E0;
+      border-radius: 10px;
+      height: 20px;
+      overflow: hidden;
+      margin: 10px 0;
+    }
+    
+    .efficiency-fill {
+      background: linear-gradient(90deg, #4CAF50, #8BC34A);
+      height: 100%;
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      padding-right: 8px;
+      color: white;
+      font-size: 11px;
+      font-weight: 600;
+    }
+    
+    .carbon-savings {
+      background: linear-gradient(135deg, #E8F5E9 0%, #C8E6C9 100%);
+      padding: 20px;
+      border-radius: 12px;
+      margin: 20px 0;
+      text-align: center;
+    }
+    
+    .carbon-value {
+      font-size: 32px;
+      font-weight: 700;
+      color: #2E7D32;
+    }
+    
+    .button {
+      display: inline-block;
+      background-color: #9C27B0;
+      color: white;
+      text-decoration: none;
+      padding: 14px 32px;
+      border-radius: 8px;
+      font-weight: 600;
+      margin: 20px 0;
+      transition: background-color 0.3s;
+    }
+    
+    .button:hover {
+      background-color: #7B1FA2;
+    }
+    
+    .next-steps {
+      background-color: #E3F2FD;
+      padding: 20px;
+      border-radius: 8px;
+      margin: 30px 0;
+    }
+    
+    .next-steps h3 {
+      color: #1976D2;
+      margin-bottom: 10px;
+    }
+    
+    .footer {
+      background-color: #f5f5f5;
+      padding: 30px;
+      text-align: center;
+      font-size: 12px;
+      color: #999;
+      border-top: 1px solid #e0e0e0;
+    }
+    
+    .footer a {
+      color: #9C27B0;
+      text-decoration: none;
+    }
+    
+    @media (max-width: 480px) {
+      .stats-grid {
+        grid-template-columns: 1fr;
+      }
+      
+      .content {
+        padding: 30px 20px;
+      }
+      
+      .header {
+        padding: 30px 20px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <div class="icon">✨</div>
+      <h1>Batch Processing Complete!</h1>
+      <div class="batch-number">Batch #{{batchNumber}}</div>
+    </div>
+    
+    <div class="content">
+      <div class="greeting">
+        Hello {{farmName}} Team,
+      </div>
+      
+      <div style="text-align: center;">
+        <div class="completion-badge">✓ Processing Completed</div>
+      </div>
+      
+      <div class="message">
+        <p>Great news! Your processing batch has been successfully completed. Here's a summary of the results:</p>
+      </div>
+      
+      <div class="stats-grid">
+        <div class="stat-card">
+          <div class="stat-value">{{inputWaste}} kg</div>
+          <div class="stat-label">Input Waste</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value">{{outputFertilizer}} kg</div>
+          <div class="stat-label">Fertilizer Produced</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value">{{outputLiquid}} L</div>
+          <div class="stat-label">Liquid Output</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value">{{conversionRate}}%</div>
+          <div class="stat-label">Conversion Rate</div>
+        </div>
+      </div>
+      
+      <div class="batch-details">
+        <div class="detail-row">
+          <span class="detail-label">Batch Number:</span>
+          <span class="detail-value">{{batchNumber}}</span>
+        </div>
+        <div class="detail-row">
+          <span class="detail-label">Process Type:</span>
+          <span class="detail-value">{{processType}}</span>
+        </div>
+        <div class="detail-row">
+          <span class="detail-label">Start Date:</span>
+          <span class="detail-value">{{startDate}}</span>
+        </div>
+        <div class="detail-row">
+          <span class="detail-label">End Date:</span>
+          <span class="detail-value">{{endDate}}</span>
+        </div>
+        <div class="detail-row">
+          <span class="detail-label">Duration:</span>
+          <span class="detail-value">{{duration}} days</span>
+        </div>
+        <div class="detail-row">
+          <span class="detail-label">Processing Efficiency:</span>
+          <span class="detail-value">
+            {{processingEfficiency}}%
+            <div class="efficiency-meter">
+              <div class="efficiency-fill" style="width: {{processingEfficiency}}%;">
+                {{#if (gt processingEfficiency 80)}}✓{{/if}}
+              </div>
+            </div>
+          </span>
+        </div>
+      </div>
+      
+      <div class="carbon-savings">
+        <div class="carbon-value">🌍 {{carbonSaved}} kg CO₂e</div>
+        <div>Carbon emissions saved through this batch</div>
+        <div style="font-size: 12px; margin-top: 10px;">Equivalent to planting {{treesEquivalent}} trees</div>
+      </div>
+      
+      <div class="next-steps">
+        <h3>📋 Next Steps</h3>
+        <ul>
+          <li>The produced fertilizer is ready for packaging and sale</li>
+          <li>Update your inventory with the new products</li>
+          <li>Schedule quality testing if required</li>
+          <li>Prepare for the next batch cycle</li>
+        </ul>
+      </div>
+      
+      <div style="text-align: center;">
+        <a href="{{batchDetailsUrl}}" class="button">View Batch Details</a>
+      </div>
+      
+      <div class="message" style="margin-top: 30px;">
+        <p>Need assistance with quality testing or product marketing? Contact our support team at <a href="mailto:processing@biodigital.com" style="color: #9C27B0;">processing@biodigital.com</a></p>
+      </div>
+    </div>
+    
+    <div class="footer">
+      <p>&copy; 2024 BioDigital BSF. All rights reserved.</p>
+      <p style="margin-top: 10px;">
+        <a href="{{unsubscribeUrl}}">Unsubscribe</a> | 
+        <a href="{{privacyUrl}}">Privacy Policy</a>
+      </p>
+    </div>
+  </div>
+</body>
+</html>
