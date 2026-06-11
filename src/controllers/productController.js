@@ -127,7 +127,7 @@ class ProductController {
         where: { id: req.params.id },
         include: {
           variants: { where: { isActive: true } },
-          farm: { select: { id: true, name: true, region: true, rating: true } },
+          farm: { select: { id: true, name: true, region: true } },
           reviews: {
             include: { user: { select: { id: true, fullName: true, profileImage: true } } },
             orderBy: { createdAt: 'desc' },

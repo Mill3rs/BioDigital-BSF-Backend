@@ -289,6 +289,130 @@ class EmailService {
     
     return this.sendEmail(email, `Batch ${batch.batchNumber} Completed`, html);
   }
+
+  async sendDriverReviewEmail(email, driverName, { rating, comment, orderNumber }) {
+    const stars = '★'.repeat(rating) + '☆'.repeat(5 - rating);
+    const html = `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <style>
+          body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
+          .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+          .header { background-color: #1a5c2a; color: white; padding: 20px; text-align: center; }
+          .content { padding: 20px; background-color: #f9f9f9; }
+          .stars { font-size: 28px; color: #f59e0b; letter-spacing: 4px; }
+          .comment { background: white; border-left: 4px solid #1a5c2a; padding: 12px 16px; margin: 16px 0; font-style: italic; color: #555; }
+          .footer { text-align: center; padding: 20px; font-size: 12px; color: #666; }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="header"><h1>You received a new review!</h1></div>
+          <div class="content">
+            <p>Hi ${driverName},</p>
+            <p>A buyer has rated your delivery for order <strong>#${orderNumber}</strong>.</p>
+            <p class="stars">${stars}</p>
+            <p><strong>${rating} out of 5 stars</strong></p>
+            ${comment ? `<div class="comment">"${comment}"</div>` : ''}
+            <p>Thank you for your great service. Keep it up!</p>
+          </div>
+          <div class="footer"><p>&copy; BioDigital BSF. All rights reserved.</p></div>
+        </div>
+      </body>
+      </html>
+    `;
+    return this.sendEmail(email, `New delivery review – Order #${orderNumber}`, html);
+  }
+
+  // ── Support ticket emails ─────────────────────────────────────────────────
+
+  /**
+   * Sent to ADMIN / MANAGER when a new support ticket is submitted.
+   */
+  async sendSupportTicketAdminEmail(email, adminName, ticket) {
+    const priorityColor = { LOW: '#6b7280', MEDIUM: '#2563eb', HIGH: '#d97706', URGENT: '#dc2626' }[ticket.priority] || '#6b7280';
+    const html = `
+      <!DOCTYPE html><html><head>
+      <style>
+        body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
+        .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+        .header { background-color: #166534; color: white; padding: 20px; text-align: center; border-radius: 6px 6px 0 0; }
+        .content { padding: 20px; background-color: #f9fafb; }
+        .box { background: white; border: 1px solid #e5e7eb; border-radius: 6px; padding: 16px; margin: 12px 0; }
+        .label { font-size: 12px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.05em; }
+        .badge { display: inline-block; padding: 2px 10px; border-radius: 9999px; font-size: 12px; font-weight: 600; color: white; background: ${priorityColor}; }
+        .footer { text-align: center; font-size: 12px; color: #9ca3af; margin-top: 20px; }
+      </style></head><body>
+      <div class="container">
+        <div class="header"><h2 style="margin:0">📋 New Support Ticket</h2></div>
+        <div class="content">
+          <p>Hello ${adminName},</p>
+          <p>A new support ticket has been submitted and requires your attention.</p>
+          <div class="box">
+            <p class="label">Ticket Number</p>
+            <p style="font-family:monospace;font-weight:700;font-size:16px;margin:4px 0">${ticket.ticketNumber}</p>
+          </div>
+          <div class="box">
+            <table style="width:100%;border-collapse:collapse">
+              <tr><td style="padding:6px 0"><span class="label">Submitted by</span><br><strong>${ticket.user?.fullName ?? 'Unknown'}</strong> (${ticket.user?.email ?? ''}) — <em>${ticket.userRole}</em></td></tr>
+              <tr><td style="padding:6px 0"><span class="label">Category</span><br><strong>${ticket.category.replace(/_/g, ' ')}</strong></td></tr>
+              <tr><td style="padding:6px 0"><span class="label">Priority</span><br><span class="badge">${ticket.priority}</span></td></tr>
+              <tr><td style="padding:6px 0"><span class="label">Title</span><br><strong>${ticket.title}</strong></td></tr>
+              <tr><td style="padding:6px 0"><span class="label">Description</span><br>${ticket.description}</td></tr>
+              <tr><td style="padding:6px 0"><span class="label">Submitted at</span><br>${new Date(ticket.createdAt).toLocaleString()}</td></tr>
+            </table>
+          </div>
+          <p>Please log in to the admin dashboard to review and respond to this ticket.</p>
+        </div>
+        <div class="footer"><p>&copy; BioDigital BSF. All rights reserved.</p></div>
+      </div>
+      </body></html>
+    `;
+    return this.sendEmail(email, `[Support] New Ticket ${ticket.ticketNumber} – ${ticket.priority} Priority`, html);
+  }
+
+  /**
+   * Sent to the user (buyer/driver/supplier) when their ticket status changes.
+   */
+  async sendSupportTicketStatusUpdateEmail(email, userName, ticket) {
+    const statusLabel = { OPEN: 'Open', IN_PROGRESS: 'In Progress', RESOLVED: 'Resolved', CLOSED: 'Closed' }[ticket.status] || ticket.status;
+    const statusColor = { OPEN: '#2563eb', IN_PROGRESS: '#d97706', RESOLVED: '#16a34a', CLOSED: '#6b7280' }[ticket.status] || '#6b7280';
+    const html = `
+      <!DOCTYPE html><html><head>
+      <style>
+        body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
+        .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+        .header { background-color: #166534; color: white; padding: 20px; text-align: center; border-radius: 6px 6px 0 0; }
+        .content { padding: 20px; background-color: #f9fafb; }
+        .box { background: white; border: 1px solid #e5e7eb; border-radius: 6px; padding: 16px; margin: 12px 0; }
+        .label { font-size: 12px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.05em; }
+        .badge { display: inline-block; padding: 3px 12px; border-radius: 9999px; font-size: 13px; font-weight: 700; color: white; background: ${statusColor}; }
+        .footer { text-align: center; font-size: 12px; color: #9ca3af; margin-top: 20px; }
+      </style></head><body>
+      <div class="container">
+        <div class="header"><h2 style="margin:0">🔔 Support Ticket Update</h2></div>
+        <div class="content">
+          <p>Hello ${userName},</p>
+          <p>Your support ticket has been updated.</p>
+          <div class="box">
+            <p class="label">Ticket Number</p>
+            <p style="font-family:monospace;font-weight:700;font-size:16px;margin:4px 0">${ticket.ticketNumber}</p>
+            <p class="label" style="margin-top:12px">New Status</p>
+            <p style="margin:4px 0"><span class="badge">${statusLabel}</span></p>
+            <p class="label" style="margin-top:12px">Title</p>
+            <p style="margin:4px 0">${ticket.title}</p>
+            ${ticket.adminNote ? `<p class="label" style="margin-top:12px">Admin Response</p><p style="margin:4px 0;background:#f0fdf4;border-left:3px solid #16a34a;padding:8px 12px;border-radius:0 4px 4px 0">${ticket.adminNote}</p>` : ''}
+            ${ticket.resolvedAt ? `<p class="label" style="margin-top:12px">Resolved At</p><p style="margin:4px 0">${new Date(ticket.resolvedAt).toLocaleString()}</p>` : ''}
+          </div>
+          <p>If you have further questions, please submit a new ticket or reply to this email.</p>
+        </div>
+        <div class="footer"><p>&copy; BioDigital BSF. All rights reserved.</p></div>
+      </div>
+      </body></html>
+    `;
+    return this.sendEmail(email, `[Support] Ticket ${ticket.ticketNumber} Updated – ${statusLabel}`, html);
+  }
 }
 
 module.exports = new EmailService();

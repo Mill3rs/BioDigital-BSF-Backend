@@ -3,6 +3,7 @@ const { body, validationResult } = require('express-validator');
 const { prisma } = require('../config/database');
 const { authenticate, authorize } = require('../middleware/auth');
 const { AppError } = require('../middleware/errorHandler');
+const { uploadMultiple } = require('../middleware/upload');
 
 const router = express.Router();
 
@@ -62,10 +63,17 @@ router.get('/', authenticate, async (req, res, next) => {
         return true;
       });
     }
-    
+
+    const enriched = filteredProducts.map(product => ({
+      ...product,
+      minPrice: product.variants.length > 0 ? Math.min(...product.variants.map(v => v.price)) : 0,
+      totalQuantity: product.variants.reduce((sum, v) => sum + (v.quantity ?? 0), 0),
+      reviewCount: product._count.reviews,
+    }));
+
     res.json({
       success: true,
-      data: filteredProducts,
+      data: enriched,
       pagination: {
         page: parseInt(page),
         limit: parseInt(limit),
@@ -155,7 +163,7 @@ router.get('/:id', authenticate, async (req, res, next) => {
       where: { id: req.params.id },
       include: {
         variants: { where: { isActive: true } },
-        farm: { select: { id: true, name: true, region: true, rating: true } },
+        farm: { select: { id: true, name: true, region: true } },
         reviews: {
           include: { user: { select: { id: true, fullName: true, profileImage: true } } },
           orderBy: { createdAt: 'desc' },
@@ -209,6 +217,53 @@ router.delete('/:id', authenticate, authorize('ADMIN'), async (req, res, next) =
       success: true,
       message: 'Product deleted successfully'
     });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Upload product images
+router.post('/:id/images', authenticate, authorize('MANAGER', 'ADMIN'),
+  uploadMultiple('product_images', 5),
+  async (req, res, next) => {
+    try {
+      const { id } = req.params;
+      const product = await prisma.product.findUnique({ where: { id }, select: { id: true, images: true } });
+      if (!product) throw new AppError('Product not found', 404);
+
+      const newImageUrls = (req.files || []).map((f) => {
+        const relativePath = f.path.replace(/\\/g, '/');
+        return `${req.protocol}://${req.get('host')}/${relativePath}`;
+      });
+
+      const updated = await prisma.product.update({
+        where: { id },
+        data: { images: [...(product.images || []), ...newImageUrls] },
+      });
+
+      res.json({ success: true, message: 'Images uploaded successfully', data: updated });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+// Remove a product image by URL
+router.delete('/:id/images', authenticate, authorize('MANAGER', 'ADMIN'), async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { url } = req.body;
+    if (!url) throw new AppError('Image URL is required', 400);
+
+    const product = await prisma.product.findUnique({ where: { id }, select: { id: true, images: true } });
+    if (!product) throw new AppError('Product not found', 404);
+
+    const updated = await prisma.product.update({
+      where: { id },
+      data: { images: (product.images || []).filter((img) => img !== url) },
+    });
+
+    res.json({ success: true, message: 'Image removed successfully', data: updated });
   } catch (error) {
     next(error);
   }
@@ -366,7 +421,21 @@ router.post('/:id/reviews', authenticate, [
         user: { select: { id: true, fullName: true, profileImage: true } }
       }
     });
-    
+
+    // Recompute and persist averageRating + reviewCount on the product
+    const agg = await prisma.productReview.aggregate({
+      where: { productId: req.params.id },
+      _avg: { rating: true },
+      _count: { rating: true },
+    });
+    await prisma.product.update({
+      where: { id: req.params.id },
+      data: {
+        averageRating: Math.round((agg._avg.rating ?? 0) * 10) / 10,
+        reviewCount: agg._count.rating,
+      },
+    });
+
     res.status(201).json({
       success: true,
       message: 'Review added successfully',
@@ -428,6 +497,203 @@ router.get('/categories/list', authenticate, async (req, res) => {
   ];
   
   res.json({ success: true, data: categories });
+});
+
+/**
+ * GET /api/products/:id/traceability
+ * Returns the full production cycle for a BSF-batch product so the client
+ * can embed it in a QR code.  Non-BSF products get a minimal payload.
+ */
+router.get('/:id/traceability', authenticate, async (req, res, next) => {
+  try {
+    const product = await prisma.product.findUnique({
+      where: { id: req.params.id },
+      include: {
+        variants: { where: { isActive: true } },
+        farm:     { select: { id: true, name: true, region: true } },
+      },
+    });
+
+    if (!product) throw new AppError('Product not found', 404);
+
+    // Tags: ['BSF', <productName>, <batchNumber>] — set during approval
+    const batchNumber = product.tags?.find(
+      (t) => t !== 'BSF' && !['Frass Fertilizer', 'Prepupae', 'BSF Larvae', 'BSF Meal', 'BSF Oil', 'Live Larvae (recycled)'].includes(t),
+    );
+
+    let cycle = null;
+
+    if (batchNumber) {
+      const batch = await prisma.processingBatch.findUnique({
+        where: { batchNumber },
+        include: {
+          farm:         { select: { id: true, name: true, region: true } },
+          createdBy:    { select: { id: true, fullName: true } },
+          wasteRecords: {
+            orderBy: { date: 'asc' },
+            select: {
+              id: true, sourceName: true, sourceType: true,
+              quantity: true, unit: true, date: true,
+              carbonSaved: true, methanePrevented: true,
+            },
+          },
+          activityLogs: {
+            include: { performedBy: { select: { id: true, fullName: true } } },
+            orderBy: { timestamp: 'asc' },
+            take: 200,
+          },
+          qualityChecks: {
+            orderBy: { checkedAt: 'desc' },
+            take: 5,
+            select: { checkType: true, parameter: true, value: true, unit: true, passed: true, notes: true, checkedAt: true },
+          },
+        },
+      });
+
+      if (batch) {
+        // Gather stage transitions
+        const stages = batch.activityLogs
+          .filter((l) => l.action === 'NOTE_ADDED' && l.metadata?.type === 'STAGE_TRANSITION')
+          .map((l) => ({
+            stage:     l.metadata.stageNumber,
+            name:      l.metadata.stageName ?? `Stage ${l.metadata.stageNumber}`,
+            date:      l.timestamp,
+            recordedBy: l.performedBy?.fullName ?? null,
+          }))
+          .sort((a, b) => a.stage - b.stage);
+
+        // Extract harvest
+        const harvestLog = batch.activityLogs.find(
+          (l) => l.action === 'NOTE_ADDED' && l.metadata?.type === 'STAGE_TRANSITION' && Number(l.metadata?.stageNumber) === 4,
+        );
+        const harvest = harvestLog ? {
+          bsfLarvaeKg:  harvestLog.metadata.harvestBsfLarvae ?? null,
+          frassKg:      harvestLog.metadata.harvestFrass     ?? null,
+          prepupaeKg:   harvestLog.metadata.harvestPrepupae  ?? null,
+          recycledKg:   harvestLog.metadata.harvestRecycled  ?? null,
+          totalKg:      harvestLog.metadata.harvestTotalKg   ?? null,
+        } : null;
+
+        // Extract output
+        const outputLog = batch.activityLogs.find(
+          (l) => l.action === 'OUTPUT_RECORDED' && (
+            l.metadata?.bsfLarvaeKg != null ||
+            l.metadata?.frassFertilizerKg != null ||
+            l.metadata?.bsfMealKg != null ||
+            l.metadata?.bsfOilKg != null ||
+            l.metadata?.prepupaeWeight != null
+          ),
+        );
+        const segLog = batch.activityLogs.find(
+          (l) => l.action === 'NOTE_ADDED' && l.metadata?.type === 'SEGREGATION_OUTPUT',
+        );
+        const rawOutput = outputLog?.metadata ?? segLog?.metadata?.products ?? null;
+        const output = rawOutput ? {
+          bsfLarvaeKg:       rawOutput.bsfLarvaeKg       ?? rawOutput['BSF Larvae']               ?? null,
+          bsfMealKg:         rawOutput.bsfMealKg         ?? rawOutput['BSF Meal']                  ?? null,
+          bsfOilKg:          rawOutput.bsfOilKg          ?? rawOutput['BSF Oil']                   ?? null,
+          frassFertilizerKg: rawOutput.frassFertilizerKg ?? rawOutput['Frass Fertilizer']          ?? null,
+          prepupaeKg:        rawOutput.prepupaeWeight     ?? rawOutput['Prepupae']                  ?? null,
+          recycledLarvaeKg:  rawOutput.recycledLarvaeKg  ?? rawOutput['Live Larvae (recycled)']    ?? null,
+          totalKg:           rawOutput.totalOutputKg     ?? null,
+        } : null;
+
+        // Find bagging record for this specific product
+        const bsfProductName = product.tags?.find((t) =>
+          ['Frass Fertilizer', 'Prepupae', 'BSF Larvae', 'BSF Meal', 'BSF Oil', 'Live Larvae (recycled)'].includes(t),
+        ) ?? null;
+        const baggingLogs = batch.activityLogs.filter(
+          (l) =>
+            l.action === 'NOTE_ADDED' &&
+            l.metadata?.type === 'BAGGING_RECORD' &&
+            (!bsfProductName || l.metadata?.product === bsfProductName) &&
+            l.metadata?.productId === product.id,
+        );
+        const bagging = baggingLogs.length > 0 ? {
+          product:      baggingLogs[0].metadata.product,
+          totalKg:      baggingLogs.reduce((s, l) => s + (l.metadata.baggedKg ?? 0), 0),
+          totalBags:    baggingLogs.reduce((s, l) => s + (l.metadata.bagCount ?? 0), 0),
+          costPrice:    baggingLogs[0].metadata.costPrice    ?? null,
+          sellingPrice: baggingLogs[0].metadata.sellingPrice ?? null,
+          approvedBy:   baggingLogs[0].metadata.approvedBy   ?? null,
+          approvedAt:   baggingLogs[0].metadata.approvedAt   ?? null,
+        } : null;
+
+        const totalInput = batch.wasteRecords.reduce((s, w) => s + (w.quantity ?? 0), 0);
+
+        cycle = {
+          batchNumber:    batch.batchNumber,
+          processType:    batch.processType,
+          startDate:      batch.startDate,
+          completedAt:    batch.completedAt,
+          farm:           batch.farm ?? product.farm,
+          createdBy:      batch.createdBy?.fullName ?? null,
+          input: {
+            totalKg: totalInput,
+            sources:  batch.wasteRecords.map((w) => ({
+              name:       w.sourceName,
+              type:       w.sourceType,
+              qty:        w.quantity,
+              unit:       w.unit,
+              date:       w.date,
+              carbonSaved: w.carbonSaved,
+            })),
+          },
+          stages,
+          processing: {
+            temperature:     batch.temperature,
+            moisture:        batch.moistureContent,
+            ph:              batch.phLevel,
+            qualityScore:    batch.qualityScore,
+            conversionRate:  batch.conversionRate,
+            efficiency:      batch.processingEfficiency,
+          },
+          harvest,
+          output,
+          bagging,
+          qualityChecks: batch.qualityChecks,
+        };
+      }
+    }
+
+    // Build the compact payload that goes into the QR code
+    const qrPayload = {
+      id:       product.id,
+      name:     product.name,
+      category: product.category,
+      farm:     cycle?.farm?.name ?? product.farm?.name ?? null,
+      batch:    cycle?.batchNumber ?? null,
+      process:  cycle?.processType ?? null,
+      start:    cycle?.startDate   ?? null,
+      done:     cycle?.completedAt ?? null,
+      inputKg:  cycle?.input?.totalKg ?? null,
+      outputKg: cycle?.output?.totalKg ?? cycle?.bagging?.totalKg ?? null,
+      baggedKg: cycle?.bagging?.totalKg ?? null,
+      bags:     cycle?.bagging?.totalBags ?? null,
+      price:    product.variants?.[0]?.price ?? null,
+      stages:   cycle?.stages?.length ?? null,
+      quality:  cycle?.processing?.qualityScore ?? null,
+      ver:      '1',
+    };
+
+    res.json({
+      success: true,
+      data: {
+        product: {
+          id:       product.id,
+          name:     product.name,
+          category: product.category,
+          tags:     product.tags,
+          variants: product.variants,
+          farm:     product.farm,
+        },
+        cycle,
+        qrPayload,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
 });
 
 module.exports = router;

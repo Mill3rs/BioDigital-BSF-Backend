@@ -7,18 +7,40 @@ class UserController {
   // Get current user profile
   async getProfile(req, res, next) {
     try {
-      const user = await prisma.user.findUnique({
-        where: { id: req.user.id },
-        include: {
-          farm: true,
-          driverProfile: true,
-          buyerProfile: true,
-          supplierProfile: true,
-          adminManaged: true
-        }
-      });
-      
+      const [user, liveWasteSupplied] = await Promise.all([
+        prisma.user.findUnique({
+          where: { id: req.user.id },
+          include: {
+            farm: true,
+            driverProfile: true,
+            buyerProfile: true,
+            supplierProfile: true,
+            adminManaged: true
+          }
+        }),
+        prisma.wasteRecord.aggregate({
+          where: { supplierId: req.user.id },
+          _sum: { quantity: true }
+        })
+      ]);
+
       const { password, ...userData } = user;
+
+      // Keep supplierProfile.totalWasteSupplied in sync with actual records
+      if (userData.supplierProfile) {
+        const storedTotal = userData.supplierProfile.totalWasteSupplied ?? 0;
+        const liveTotal = liveWasteSupplied._sum.quantity ?? 0;
+        userData.supplierProfile = { ...userData.supplierProfile, totalWasteSupplied: liveTotal };
+
+        // Persist if drifted
+        if (storedTotal !== liveTotal) {
+          await prisma.supplierProfile.update({
+            where: { userId: req.user.id },
+            data: { totalWasteSupplied: liveTotal }
+          }).catch(() => {});
+        }
+      }
+
       res.json({ success: true, data: userData });
     } catch (error) {
       next(error);

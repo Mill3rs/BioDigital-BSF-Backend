@@ -27,6 +27,9 @@ const reportRoutes = require('./routes/reports');
 const syncRoutes = require('./routes/sync');
 const notificationRoutes = require('./routes/notifications');
 const adminRoutes = require('./routes/admin');
+const postProcessingRoutes = require('./routes/post-processing');
+const supportRoutes = require('./routes/support');
+const payoutRoutes = require('./routes/payout');
 
 const app = express();
 const server = createServer(app);
@@ -116,6 +119,9 @@ app.use('/api/reports', reportRoutes);
 app.use('/api/sync', syncRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/admin', adminRoutes);
+app.use('/api/post-processing', postProcessingRoutes);
+app.use('/api/support', supportRoutes);
+app.use('/api/payout', payoutRoutes);
 
 // WebSocket handlers
 const { initializeSocket } = require('./sockets');

@@ -1,490 +1,198 @@
+/**
+ * WatermelonDB Sync Protocol
+ * --------------------------
+ * Mounted at /api/sync in index.js.
+ *
+ * GET  /api/sync?lastPulledAt=<unix_ms>   — pull server changes
+ * POST /api/sync                          — push client changes
+ *
+ * ID strategy: WatermelonDB generates client-side UUIDs used as the server
+ * record ID directly. No ID remapping needed — WDB `id` = server `id`.
+ *
+ * Tables synced:
+ *   waste_records  — SUPPLIER (read/write own), DRIVER (read assigned)
+ *   notifications  — all roles (server-push; client marks read)
+ */
 const express = require('express');
 const { prisma } = require('../config/database');
 const { authenticate } = require('../middleware/auth');
-const { v4: uuidv4 } = require('uuid');
 
 const router = express.Router();
 
-// Sync offline data to server
-router.post('/sync', authenticate, async (req, res, next) => {
-  const { pendingOperations, lastSync } = req.body;
-  const results = [];
-  const conflicts = [];
+// ─── Mapping helpers ─────────────────────────────────────────────────────────
 
-  for (const operation of pendingOperations || []) {
-    try {
-      let result;
-      
-      switch (operation.action) {
-        case 'CREATE_WASTE':
-          const existingWaste = await prisma.wasteRecord.findFirst({
-            where: {
-              OR: [
-                { id: operation.data.id },
-                { 
-                  sourceName: operation.data.sourceName,
-                  date: operation.data.date,
-                  farmId: operation.data.farmId
-                }
-              ]
-            }
-          });
-          
-          if (existingWaste && !operation.data.force) {
-            conflicts.push({
-              operationId: operation.id,
-              entityType: 'waste',
-              serverData: existingWaste,
-              clientData: operation.data
-            });
-          } else {
-            result = await prisma.wasteRecord.create({
-              data: {
-                ...operation.data,
-                id: operation.data.id || uuidv4(),
-                recordedById: req.user.id
-              }
-            });
-            results.push({ success: true, operationId: operation.id, data: result });
-          }
-          break;
-          
-        case 'UPDATE_WASTE':
-          result = await prisma.wasteRecord.update({
-            where: { id: operation.data.id },
-            data: operation.data
-          });
-          results.push({ success: true, operationId: operation.id, data: result });
-          break;
-          
-        case 'CREATE_BATCH':
-          result = await prisma.processingBatch.create({
-            data: {
-              ...operation.data,
-              id: operation.data.id || uuidv4(),
-              createdById: req.user.id
-            }
-          });
-          results.push({ success: true, operationId: operation.id, data: result });
-          break;
-          
-        case 'UPDATE_BATCH':
-          result = await prisma.processingBatch.update({
-            where: { id: operation.data.id },
-            data: operation.data
-          });
-          results.push({ success: true, operationId: operation.id, data: result });
-          break;
-          
-        case 'CREATE_ORDER':
-          result = await prisma.order.create({
-            data: {
-              ...operation.data,
-              id: operation.data.id || uuidv4(),
-              customerId: req.user.id,
-              orderNumber: `ORD-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`
-            }
-          });
-          results.push({ success: true, operationId: operation.id, data: result });
-          break;
-          
-        case 'UPDATE_ORDER':
-          result = await prisma.order.update({
-            where: { id: operation.data.id },
-            data: operation.data
-          });
-          results.push({ success: true, operationId: operation.id, data: result });
-          break;
-          
-        default:
-          results.push({
-            success: false,
-            operationId: operation.id,
-            error: `Unknown action: ${operation.action}`
-          });
-      }
-      
-      await prisma.offlineSync.create({
-        data: {
-          userId: req.user.id,
-          action: operation.action,
-          entityType: operation.entityType,
-          entityId: result?.id,
-          data: operation.data,
-          status: 'SYNCED',
-          syncedAt: new Date()
-        }
-      });
-      
-    } catch (error) {
-      results.push({
-        success: false,
-        operationId: operation.id,
-        error: error.message
-      });
-      
-      await prisma.offlineSync.create({
-        data: {
-          userId: req.user.id,
-          action: operation.action,
-          entityType: operation.entityType,
-          data: operation.data,
-          status: 'FAILED',
-          errorMessage: error.message,
-          retryCount: (operation.retryCount || 0) + 1
-        }
-      });
-    }
-  }
-  
-  res.json({
-    success: true,
-    results,
-    conflicts
-  });
-});
-
-// Get data for offline use
-router.get('/offline-data', authenticate, async (req, res, next) => {
-  try {
-    const user = await prisma.user.findUnique({
-      where: { id: req.user.id },
-      include: {
-        farm: true,
-        driverProfile: true,
-        buyerProfile: true,
-        supplierProfile: true
-      }
-    });
-    
-    const offlineData = {
-      user: {
-        id: user.id,
-        email: user.email,
-        fullName: user.fullName,
-        phoneNumber: user.phoneNumber,
-        role: user.role,
-        status: user.status,
-        farm: user.farm
-      },
-      timestamp: new Date().toISOString(),
-      version: '1.0.0'
-    };
-    
-    if (user.role === 'MANAGER' && user.farm) {
-      const [wasteRecords, processingBatches, products, orders] = await Promise.all([
-        prisma.wasteRecord.findMany({
-          where: { farmId: user.farm.id },
-          orderBy: { date: 'desc' },
-          take: 100
-        }),
-        prisma.processingBatch.findMany({
-          where: { farmId: user.farm.id },
-          include: {
-            wasteRecords: true,
-            activityLogs: { orderBy: { timestamp: 'desc' }, take: 50 }
-          },
-          orderBy: { startDate: 'desc' }
-        }),
-        prisma.product.findMany({
-          where: { farmId: user.farm.id, status: 'ACTIVE' },
-          include: { variants: true }
-        }),
-        prisma.order.findMany({
-          where: { farmId: user.farm.id },
-          include: { items: { include: { variant: { include: { product: true } } } } },
-          orderBy: { createdAt: 'desc' },
-          take: 50
-        })
-      ]);
-      
-      offlineData.wasteRecords = wasteRecords;
-      offlineData.processingBatches = processingBatches;
-      offlineData.products = products;
-      offlineData.orders = orders;
-    }
-    
-    if (user.role === 'DRIVER' && user.driverProfile) {
-      const orders = await prisma.order.findMany({
-        where: {
-          driverId: user.id,
-          status: { in: ['PROCESSING', 'SHIPPED', 'OUT_FOR_DELIVERY'] }
-        },
-        include: {
-          items: { include: { variant: { include: { product: true } } } },
-          customer: { select: { id: true, fullName: true, phoneNumber: true, email: true } }
-        },
-        orderBy: { createdAt: 'desc' }
-      });
-      
-      offlineData.orders = orders;
-      offlineData.driverProfile = user.driverProfile;
-    }
-    
-    if (user.role === 'BUYER' && user.buyerProfile) {
-      const [orders, cart] = await Promise.all([
-        prisma.order.findMany({
-          where: { customerId: user.id },
-          include: { items: { include: { variant: { include: { product: true } } } } },
-          orderBy: { createdAt: 'desc' },
-          take: 50
-        }),
-        prisma.cart.findUnique({
-          where: { userId: user.id },
-          include: { items: { include: { variant: { include: { product: true } } } } }
-        })
-      ]);
-      
-      offlineData.orders = orders;
-      offlineData.cart = cart;
-      offlineData.buyerProfile = user.buyerProfile;
-    }
-    
-    if (user.role === 'SUPPLIER' && user.supplierProfile) {
-      const wasteRecords = await prisma.wasteRecord.findMany({
-        where: { supplierId: user.id },
-        orderBy: { date: 'desc' },
-        take: 100
-      });
-      
-      offlineData.wasteRecords = wasteRecords;
-      offlineData.supplierProfile = user.supplierProfile;
-    }
-    
-    const pendingOps = await prisma.offlineSync.findMany({
-      where: {
-        userId: req.user.id,
-        status: 'FAILED',
-        retryCount: { lt: 5 }
-      },
-      orderBy: { createdAt: 'asc' }
-    });
-    
-    offlineData.pendingOperations = pendingOps;
-    
-    res.json({ success: true, data: offlineData });
-  } catch (error) {
-    next(error);
-  }
-});
-
-// Get sync status
-router.get('/status', authenticate, async (req, res, next) => {
-  try {
-    const [pendingSync, failedSync, lastSuccessfulSync] = await Promise.all([
-      prisma.offlineSync.count({
-        where: { userId: req.user.id, status: 'PENDING' }
-      }),
-      prisma.offlineSync.count({
-        where: { userId: req.user.id, status: 'FAILED' }
-      }),
-      prisma.offlineSync.findFirst({
-        where: { userId: req.user.id, status: 'SYNCED' },
-        orderBy: { syncedAt: 'desc' }
-      })
-    ]);
-    
-    res.json({
-      success: true,
-      data: {
-        pendingCount: pendingSync,
-        failedCount: failedSync,
-        lastSync: lastSuccessfulSync?.syncedAt,
-        needsSync: pendingSync > 0 || failedSync > 0
-      }
-    });
-  } catch (error) {
-    next(error);
-  }
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// WatermelonDB Sync Protocol
-//   Pull:  GET  /api/sync?lastPulledAt=<unix_ms>
-//   Push:  POST /api/sync        body: { lastPulledAt, changes }
-//
-// All tables are keyed by WatermelonDB local id. The `server_id` column stores
-// the Postgres CUID so the app can reference server records after sync.
-// ─────────────────────────────────────────────────────────────────────────────
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-function mapWaste(r) {
+function wasteToWdb(r) {
+  const loc = r.location || {};
   return {
-    id: r.id,
-    server_id: r.id,
-    source_name: r.sourceName,
-    source_type: r.sourceType,
-    quantity: r.quantity,
-    unit: r.unit,
-    date: new Date(r.date).getTime(),
-    status: r.status,
-    description: r.description ?? null,
-    notes: r.notes ?? null,
-    location_lat: r.location?.lat ?? null,
-    location_lng: r.location?.lng ?? null,
-    location_address: r.location?.address ?? null,
-    farm_id: r.farmId ?? null,
-    supplier_id: r.supplierId ?? null,
-    driver_id: r.driverId ?? null,
-    carbon_saved: r.carbonSaved ?? null,
-    points_awarded: r.pointsAwarded ?? null,
-    is_synced: true,
-    created_at: new Date(r.createdAt).getTime(),
-    updated_at: new Date(r.updatedAt).getTime(),
+    id:               r.id,
+    server_id:        r.id,
+    source_name:      r.sourceName,
+    source_type:      r.sourceType,
+    quantity:         r.quantity,
+    unit:             r.unit,
+    date:             new Date(r.date).getTime(),
+    status:           r.status,
+    description:      r.description      ?? null,
+    notes:            r.notes            ?? null,
+    location_lat:     loc.lat            ?? null,
+    location_lng:     loc.lng            ?? null,
+    location_address: loc.address        ?? null,
+    farm_id:          r.farmId           ?? null,
+    supplier_id:      r.supplierId       ?? null,
+    driver_id:        r.driverId         ?? null,
+    carbon_saved:     r.carbonSaved      ?? null,
+    points_awarded:   r.pointsAwarded    ?? 0,
+    is_synced:        true,
+    created_at:       new Date(r.createdAt).getTime(),
+    updated_at:       new Date(r.updatedAt).getTime(),
   };
 }
 
-function mapNotification(n) {
+function notifToWdb(n) {
   return {
-    id: n.id,
-    server_id: n.id,
-    title: n.title,
-    message: n.message,
-    type: n.type,
-    read: n.read,
-    metadata: n.metadata ? JSON.stringify(n.metadata) : null,
+    id:         n.id,
+    server_id:  n.id,
+    title:      n.title,
+    message:    n.message,
+    type:       n.type,
+    read:       n.read,
+    metadata:   n.metadata != null ? JSON.stringify(n.metadata) : null,
     created_at: new Date(n.createdAt).getTime(),
   };
 }
 
-function buildWasteWhere(user, since) {
-  const where = { updatedAt: { gte: since } };
-  if (user.role === 'SUPPLIER') { where.supplierId = user.id; }
-  else if (user.role === 'DRIVER') { where.driverId = user.id; }
-  else if (user.role === 'MANAGER' && user.farmId) { where.farmId = user.farmId; }
-  else if (user.role === 'ADMIN' && user.adminManaged?.id) {
-    where.farm = { adminId: user.adminManaged.id };
+function wasteWhereForUser(user, since) {
+  const base = { deletedAt: null, updatedAt: { gte: since } };
+  if (user.role === 'SUPPLIER') {
+    return { ...base, OR: [{ supplierId: user.id }, { recordedById: user.id }] };
   }
-  return where;
+  if (user.role === 'DRIVER') {
+    return { ...base, driverId: user.id };
+  }
+  if ((user.role === 'MANAGER' || user.role === 'ADMIN' || user.role === 'SUPER_ADMIN') && user.farmId) {
+    return { ...base, farmId: user.farmId };
+  }
+  return { ...base, id: '__no_match__' };
 }
 
-// ── PULL ──────────────────────────────────────────────────────────────────────
+// ─── PULL ─────────────────────────────────────────────────────────────────────
 
 router.get('/', authenticate, async (req, res, next) => {
   try {
-    const lastPulledAt = req.query.lastPulledAt
-      ? new Date(parseInt(req.query.lastPulledAt, 10))
-      : new Date(0);
+    const rawTs = parseInt(req.query.lastPulledAt ?? '0', 10);
+    const since = new Date(isNaN(rawTs) ? 0 : rawTs);
+    const nowMs  = Date.now();
 
-    const since = lastPulledAt;
-    const now = Date.now();
-
-    const wasteWhere = buildWasteWhere(req.user, since);
-
-    const [allWaste, allNotifs] = await Promise.all([
-      prisma.wasteRecord.findMany({ where: wasteWhere }),
+    const [wasteRows, notifRows, deletedRows] = await Promise.all([
+      prisma.wasteRecord.findMany({ where: wasteWhereForUser(req.user, since) }),
       prisma.notification.findMany({
         where: { userId: req.user.id, createdAt: { gte: since } },
         orderBy: { createdAt: 'desc' },
-        take: 100,
+        take: 200,
+      }),
+      // Records soft-deleted on server since last pull
+      prisma.wasteRecord.findMany({
+        where: { deletedAt: { gte: since }, ...(() => {
+          const w = wasteWhereForUser(req.user, new Date(0));
+          const { deletedAt: _d, ...rest } = w;
+          return rest;
+        })() },
+        select: { id: true },
       }),
     ]);
 
-    // Separate created vs updated (WatermelonDB expects this split)
-    const wasteCreated = allWaste.filter(r => new Date(r.createdAt) >= since).map(mapWaste);
-    const wasteUpdated = allWaste.filter(r => new Date(r.createdAt) < since).map(mapWaste);
-    const notifCreated = allNotifs.map(mapNotification);
+    const wasteCreated = [];
+    const wasteUpdated = [];
+    for (const r of wasteRows) {
+      (new Date(r.createdAt) >= since ? wasteCreated : wasteUpdated).push(wasteToWdb(r));
+    }
 
-    res.json({
-      success: true,
+    return res.json({
       changes: {
         waste_records: {
           created: wasteCreated,
           updated: wasteUpdated,
-          deleted: [],
+          deleted: deletedRows.map(r => r.id),
         },
         notifications: {
-          created: notifCreated,
+          created: notifRows.map(notifToWdb),
           updated: [],
           deleted: [],
         },
       },
-      timestamp: now,
+      timestamp: nowMs,
     });
-  } catch (error) {
-    next(error);
+  } catch (err) {
+    next(err);
   }
 });
 
-// ── PUSH ──────────────────────────────────────────────────────────────────────
+// ─── PUSH ─────────────────────────────────────────────────────────────────────
 
 router.post('/', authenticate, async (req, res, next) => {
   try {
-    const { changes } = req.body;
-    const wasteChanges = changes?.waste_records ?? { created: [], updated: [], deleted: [] };
+    const { changes = {} } = req.body;
+    const waste  = changes.waste_records  ?? {};
+    const notifs = changes.notifications  ?? {};
 
-    // Process created waste records from client
-    for (const raw of wasteChanges.created ?? []) {
-      // Check if already on server (client may have a local-only record with no server_id)
-      if (raw.server_id) { continue; } // already exists on server
+    // waste_records.created — use client UUID as server ID (upsert for idempotency)
+    for (const raw of waste.created ?? []) {
+      if (!raw.id) continue;
+      const location =
+        raw.location_lat != null || raw.location_address != null
+          ? { lat: raw.location_lat ?? null, lng: raw.location_lng ?? null, address: raw.location_address ?? null }
+          : null;
 
-      const duplicate = await prisma.wasteRecord.findFirst({
-        where: {
-          sourceName: raw.source_name,
-          date: new Date(raw.date),
-          supplierId: req.user.role === 'SUPPLIER' ? req.user.id : undefined,
-        },
-      });
-      if (duplicate) { continue; }
-
-      await prisma.wasteRecord.create({
-        data: {
-          id: raw.server_id || uuidv4(),
-          sourceName: raw.source_name,
-          sourceType: raw.source_type,
-          quantity: raw.quantity,
-          unit: raw.unit || 'kg',
-          date: new Date(raw.date),
-          status: 'PENDING',
-          description: raw.description ?? null,
-          notes: raw.notes ?? null,
-          location: (raw.location_lat != null || raw.location_address)
-            ? { lat: raw.location_lat, lng: raw.location_lng, address: raw.location_address }
-            : undefined,
-          farmId: raw.farm_id ?? null,
-          supplierId: req.user.role === 'SUPPLIER' ? req.user.id : (raw.supplier_id ?? null),
+      await prisma.wasteRecord.upsert({
+        where:  { id: raw.id },
+        create: {
+          id:           raw.id,
+          sourceName:   raw.source_name   ?? 'Unknown',
+          sourceType:   raw.source_type   ?? 'OTHER',
+          quantity:     Number(raw.quantity ?? 0),
+          unit:         raw.unit          ?? 'kg',
+          date:         raw.date ? new Date(raw.date) : new Date(),
+          status:       'PENDING',
+          description:  raw.description   ?? null,
+          notes:        raw.notes         ?? null,
+          location,
+          farmId:       raw.farm_id       ?? null,
+          supplierId:   req.user.role === 'SUPPLIER' ? req.user.id : (raw.supplier_id ?? null),
           recordedById: req.user.id,
         },
-      }).catch((err) => {
-        // Non-fatal: log and continue
-        console.warn('[Sync push] Failed to create waste record:', err.message);
-      });
+        update: {},   // already on server — preserve server state
+      }).catch(err => console.warn('[Sync] upsert waste failed:', raw.id, err.message));
     }
 
-    // Process status updates from client (driver/supplier marking collected etc.)
-    for (const raw of wasteChanges.updated ?? []) {
-      const serverId = raw.server_id || raw.id;
-      if (!serverId) { continue; }
-      const allowed = ['PENDING', 'CANCELLED', 'NO_SHOW'];
-      if (!allowed.includes(raw.status)) { continue; } // only allow client-side status changes
+    // waste_records.updated — clients can only update notes on their own records
+    for (const raw of waste.updated ?? []) {
+      if (!raw.id) continue;
       await prisma.wasteRecord.updateMany({
-        where: { id: serverId, recordedById: req.user.id },
-        data: { notes: raw.notes ?? undefined },
+        where: { id: raw.id, recordedById: req.user.id },
+        data:  { notes: raw.notes ?? undefined },
       }).catch(() => {});
     }
 
-    res.json({ success: true });
-  } catch (error) {
-    next(error);
-  }
-});
+    // waste_records.deleted — soft-delete PENDING records created by this user
+    for (const id of waste.deleted ?? []) {
+      await prisma.wasteRecord.updateMany({
+        where: { id, recordedById: req.user.id, status: 'PENDING' },
+        data:  { deletedAt: new Date() },
+      }).catch(() => {});
+    }
 
-// ─────────────────────────────────────────────────────────────────────────────
+    // notifications.updated — only allow marking as read
+    for (const raw of notifs.updated ?? []) {
+      if (!raw.id) continue;
+      await prisma.notification.updateMany({
+        where: { id: raw.id, userId: req.user.id },
+        data:  { read: raw.read ?? true, readAt: raw.read ? new Date() : null },
+      }).catch(() => {});
+    }
 
-// Clear pending operations
-router.delete('/pending', authenticate, async (req, res, next) => {
-  try {
-    await prisma.offlineSync.deleteMany({
-      where: { userId: req.user.id, status: 'PENDING' }
-    });
-    
-    res.json({
-      success: true,
-      message: 'Pending operations cleared'
-    });
-  } catch (error) {
-    next(error);
+    return res.json({ success: true });
+  } catch (err) {
+    next(err);
   }
 });
 

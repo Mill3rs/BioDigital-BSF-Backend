@@ -7,6 +7,74 @@ const { generateBatchNumber } = require('../utils/helpers');
 
 const router = express.Router();
 
+// Get top-performing suppliers by total waste supplied
+router.get('/top-suppliers', authenticate, authorize('SUPER_ADMIN', 'ADMIN', 'MANAGER'), async (req, res, next) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit) || 5, 20);
+
+    // Scope suppliers to the relevant admin organisation via User.managedById
+    const profileWhere = {};
+    if (req.user.role === 'ADMIN' && req.user.adminManaged?.id) {
+      profileWhere.user = { managedById: req.user.adminManaged.id };
+    } else if (req.user.role === 'MANAGER' && req.user.farm?.adminId) {
+      profileWhere.user = { managedById: req.user.farm.adminId };
+    }
+
+    // Fetch all supplier profiles with user info
+    const profiles = await prisma.supplierProfile.findMany({
+      where: profileWhere,
+      select: {
+        userId: true,
+        farmName: true,
+        organizationName: true,
+        collectionAddress: true,
+        totalWasteSupplied: true,
+        user: { select: { id: true, fullName: true } },
+      },
+    });
+
+    if (profiles.length === 0) {
+      return res.json({ success: true, data: [] });
+    }
+
+    // Always also aggregate carbon from waste records (totalWasteSupplied doesn't track carbon)
+    const supplierIds = profiles.map((p) => p.userId);
+    const wasteRows = await prisma.wasteRecord.groupBy({
+      by: ['supplierId'],
+      where: { supplierId: { in: supplierIds } },
+      _sum: { quantity: true, carbonSaved: true },
+    });
+    const wasteMap = Object.fromEntries(
+      wasteRows.map((r) => [r.supplierId, { waste: r._sum.quantity ?? 0, carbon: r._sum.carbonSaved ?? 0 }])
+    );
+
+    const data = profiles
+      .map((p) => {
+        const name = p.farmName || p.organizationName || p.user?.fullName || 'Unknown';
+        const address = p.collectionAddress ?? {};
+        // Prefer the denormalized counter (updated on each waste create/delete);
+        // fall back to live aggregate when it's zero (legacy data).
+        const wasteFromRecords = wasteMap[p.userId]?.waste ?? 0;
+        const waste = p.totalWasteSupplied > 0 ? p.totalWasteSupplied : wasteFromRecords;
+        const carbon = wasteMap[p.userId]?.carbon ?? 0;
+        return {
+          id: p.userId,
+          name,
+          country: address.country ?? null,
+          region: address.region ?? null,
+          totalWasteCollected: waste,
+          totalCarbonSaved: carbon,
+        };
+      })
+      .sort((a, b) => b.totalWasteCollected - a.totalWasteCollected)
+      .slice(0, limit);
+
+    res.json({ success: true, data });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // Get all supplier organizations
 router.get('/supplier-orgs', authenticate, authorize('SUPER_ADMIN', 'ADMIN', 'MANAGER'), async (req, res, next) => {
   try {

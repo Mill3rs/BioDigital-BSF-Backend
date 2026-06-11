@@ -28,6 +28,36 @@ router.get('/profile', authenticate, authorize('DRIVER'), async (req, res, next)
   }
 });
 
+// Get company / processing center location for the logged-in driver
+router.get('/company', authenticate, authorize('DRIVER'), async (req, res, next) => {
+  try {
+    const profile = await prisma.driverProfile.findUnique({
+      where: { userId: req.user.id },
+      include: {
+        admin: {
+          select: {
+            companyName: true,
+            lat: true,
+            lng: true,
+            address: true,
+            city: true,
+            region: true,
+            country: true,
+          }
+        }
+      }
+    });
+
+    if (!profile?.admin) {
+      return res.json({ success: true, data: null });
+    }
+
+    res.json({ success: true, data: profile.admin });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // Update driver profile
 router.put('/profile', authenticate, authorize('DRIVER'), async (req, res, next) => {
   try {
@@ -215,26 +245,80 @@ router.post('/location', authenticate, authorize('DRIVER'), [
   }
 
   try {
-    const { lat, lng, orderId } = req.body;
+    const { lat, lng, orderId, wasteId } = req.body;
     
     await prisma.driverProfile.update({
       where: { userId: req.user.id },
       data: { currentLocation: { lat, lng, updatedAt: new Date() } }
     });
-    
-    if (orderId) {
-      // Emit socket event for real-time tracking
-      const io = req.app.get('io');
-      io.to(`order-${orderId}`).emit('driver:location', {
-        driverId: req.user.id,
-        location: { lat, lng },
-        timestamp: new Date()
-      });
+
+    const io = req.app.get('io');
+    const locationPayload = {
+      driverId: req.user.id,
+      driverName: req.user.fullName,
+      location: { lat, lng },
+      timestamp: new Date()
+    };
+
+    if (io && orderId) {
+      io.to(`order-${orderId}`).emit('driver:location', locationPayload);
+    }
+
+    if (io && wasteId) {
+      io.to(`waste:${wasteId}`).emit('driver:location', locationPayload);
     }
     
     res.json({
       success: true,
       message: 'Location updated successfully'
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Get driver current location for a waste record (supplier polling)
+router.get('/location/:wasteId', authenticate, async (req, res, next) => {
+  try {
+    const { wasteId } = req.params;
+
+    // Verify the requester is the supplier who submitted this waste, the assigned driver, or farm staff
+    const waste = await prisma.wasteRecord.findUnique({
+      where: { id: wasteId },
+      select: {
+        supplierId: true,
+        driver: {
+          select: {
+            id: true,
+            driverProfile: { select: { currentLocation: true } },
+            fullName: true
+          }
+        }
+      }
+    });
+
+    if (!waste) {
+      return res.status(404).json({ success: false, message: 'Waste record not found' });
+    }
+
+    const allowedRoles = ['ADMIN', 'SUPER_ADMIN', 'MANAGER', 'DRIVER'];
+    const isSupplier = waste.supplierId === req.user.id;
+    const isStaff = allowedRoles.includes(req.user.role);
+
+    if (!isSupplier && !isStaff) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
+
+    if (!waste.driver) {
+      return res.json({ success: true, data: null, message: 'No driver assigned' });
+    }
+
+    res.json({
+      success: true,
+      data: {
+        driverName: waste.driver.fullName,
+        location: waste.driver.driverProfile?.currentLocation ?? null
+      }
     });
   } catch (error) {
     next(error);

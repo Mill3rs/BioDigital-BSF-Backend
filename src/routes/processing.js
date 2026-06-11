@@ -429,9 +429,16 @@ router.post('/batches/:id/add-waste', authenticate, authorize('MANAGER', 'ADMIN'
 
 // Record batch output and mark as Processed
 router.post('/batches/:id/record-output', authenticate, authorize('MANAGER', 'ADMIN'), [
-  body('larvaeWeight').optional({ nullable: true }).isFloat({ min: 0 }).withMessage('Larvae weight must be ≥ 0'),
-  body('frassWeight').optional({ nullable: true }).isFloat({ min: 0 }).withMessage('Frass weight must be ≥ 0'),
-  body('prepupaeWeight').optional({ nullable: true }).isFloat({ min: 0 }).withMessage('Pre-pupae weight must be ≥ 0'),
+  // Legacy fields (kept for backward compat)
+  body('larvaeWeight').optional({ nullable: true }).isFloat({ min: 0 }),
+  body('frassWeight').optional({ nullable: true }).isFloat({ min: 0 }),
+  body('prepupaeWeight').optional({ nullable: true }).isFloat({ min: 0 }),
+  // New product breakdown fields
+  body('bsfLarvaeKg').optional({ nullable: true }).isFloat({ min: 0 }).withMessage('BSF larvae weight must be ≥ 0'),
+  body('bsfMealKg').optional({ nullable: true }).isFloat({ min: 0 }).withMessage('BSF meal weight must be ≥ 0'),
+  body('bsfOilKg').optional({ nullable: true }).isFloat({ min: 0 }).withMessage('BSF oil weight must be ≥ 0'),
+  body('frassFertilizerKg').optional({ nullable: true }).isFloat({ min: 0 }).withMessage('Frass fertilizer weight must be ≥ 0'),
+  body('recycledLarvaeKg').optional({ nullable: true }).isFloat({ min: 0 }).withMessage('Recycled larvae weight must be ≥ 0'),
   body('endDate').optional({ nullable: true }).isISO8601().withMessage('Valid end date required'),
   body('notes').optional().isString(),
 ], async (req, res, next) => {
@@ -442,13 +449,23 @@ router.post('/batches/:id/record-output', authenticate, authorize('MANAGER', 'AD
   try {
     const { id } = req.params;
     await assertBatchIsActive(id);
-    const { larvaeWeight, frassWeight, prepupaeWeight, notes, endDate } = req.body;
+    const {
+      larvaeWeight, frassWeight, prepupaeWeight,
+      bsfLarvaeKg, bsfMealKg, bsfOilKg, frassFertilizerKg, recycledLarvaeKg,
+      notes, endDate,
+    } = req.body;
 
     const toFloat = (v) => (v != null && v !== '' ? parseFloat(v) : 0);
-    const larvae  = toFloat(larvaeWeight);
-    const frass   = toFloat(frassWeight);
-    const prepup  = toFloat(prepupaeWeight);
-    const totalOutput = larvae + frass + prepup;
+
+    // Prefer new product fields; fall back to legacy fields
+    const bsfLarvae      = toFloat(bsfLarvaeKg)      || toFloat(larvaeWeight);
+    const bsfMeal        = toFloat(bsfMealKg);
+    const bsfOil         = toFloat(bsfOilKg);
+    const frassOut       = toFloat(frassFertilizerKg) || toFloat(frassWeight);
+    const prepup         = toFloat(prepupaeWeight);
+    const recycled       = toFloat(recycledLarvaeKg);
+    // Total sellable output (recycled larvae go back to breeding, not counted as product)
+    const totalOutput = bsfLarvae + bsfMeal + bsfOil + frassOut + prepup;
 
     const closedDate = endDate ? new Date(endDate) : new Date();
 
@@ -469,17 +486,29 @@ router.post('/batches/:id/record-output', authenticate, authorize('MANAGER', 'AD
       data: { status: 'PROCESSED', processingDate: closedDate },
     });
 
+    const outputParts = [
+      bsfLarvae  > 0 ? `BSF larvae: ${bsfLarvae} kg`       : null,
+      bsfMeal    > 0 ? `BSF meal: ${bsfMeal} kg`           : null,
+      bsfOil     > 0 ? `BSF oil: ${bsfOil} kg`             : null,
+      frassOut   > 0 ? `Frass fertilizer: ${frassOut} kg`  : null,
+      prepup     > 0 ? `Pre-pupae: ${prepup} kg`           : null,
+      recycled   > 0 ? `Recycled larvae: ${recycled} kg`   : null,
+    ].filter(Boolean).join(', ');
+
     await prisma.activityLog.create({
       data: {
         batchId:       id,
         action:        'OUTPUT_RECORDED',
-        description:   `Output recorded — total: ${totalOutput.toFixed(2)} kg (larvae: ${larvae} kg, frass: ${frass} kg, pre-pupae: ${prepup} kg)`,
+        description:   `Output recorded — total: ${totalOutput.toFixed(2)} kg${outputParts ? ` (${outputParts})` : ''}`,
         performedById: req.user.id,
         metadata: {
-          larvaeWeight:   larvae || null,
-          frassWeight:    frass  || null,
-          prepupaeWeight: prepup || null,
-          totalOutputKg:  totalOutput,
+          bsfLarvaeKg:       bsfLarvae  || null,
+          bsfMealKg:         bsfMeal    || null,
+          bsfOilKg:          bsfOil     || null,
+          frassFertilizerKg: frassOut   || null,
+          recycledLarvaeKg:  recycled   || null,
+          prepupaeWeight:    prepup     || null,
+          totalOutputKg:     totalOutput,
         },
       },
     });
@@ -488,7 +517,7 @@ router.post('/batches/:id/record-output', authenticate, authorize('MANAGER', 'AD
       data: {
         batchId:       id,
         action:        'BATCH_COMPLETED',
-        description:   `Batch marked as Processed — ended ${closedDate.toDateString()}`,
+        description:   `Batch marked as Complete — ended ${closedDate.toDateString()}`,
         performedById: req.user.id,
         metadata: { endDate: closedDate.toISOString() },
       },
@@ -680,15 +709,22 @@ router.get('/batches/:id/stage', authenticate, async (req, res, next) => {
 router.post('/batches/:id/advance-stage',
   authenticate,
   authorize('MANAGER', 'ADMIN'),
-  [body('notes').optional().isString()],
+  [
+    body('notes').optional().isString(),
+    body('stageWeight').optional({ nullable: true }).isFloat({ min: 0 }),
+    body('harvestBsfLarvae').optional({ nullable: true }).isFloat({ min: 0 }),
+    body('harvestFrass').optional({ nullable: true }).isFloat({ min: 0 }),
+    body('harvestPrepupae').optional({ nullable: true }).isFloat({ min: 0 }),
+    body('harvestRecycled').optional({ nullable: true }).isFloat({ min: 0 }),
+  ],
   async (req, res, next) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
       return res.status(400).json({ success: false, errors: errors.array() });
     }
     try {
-      const { id }     = req.params;
-      const { notes }  = req.body;
+      const { id } = req.params;
+      const { notes, stageWeight, harvestBsfLarvae, harvestFrass, harvestPrepupae, harvestRecycled } = req.body;
 
       const batch = await assertBatchIsActive(id);
 
@@ -710,6 +746,11 @@ router.post('/batches/:id/advance-stage',
       const nextStage = BSF_STAGES[nextNum - 1];
       const isLifecycleComplete = nextNum === BSF_STAGES.length; // advancing to final stage
 
+      const toF = (v) => (v != null && v !== '' ? parseFloat(v) : null);
+      const harvestTotal = [harvestBsfLarvae, harvestFrass, harvestPrepupae].reduce(
+        (s, v) => s + (toF(v) ?? 0), 0
+      );
+
       await prisma.activityLog.create({
         data: {
           batchId:        id,
@@ -717,10 +758,16 @@ router.post('/batches/:id/advance-stage',
           description:    `Advanced to Stage ${nextNum}: ${nextStage.name}`,
           performedById:  req.user.id,
           metadata: {
-            type:        'STAGE_TRANSITION',
-            stageNumber: nextNum,
-            stageName:   nextStage.name,
-            notes:       notes || null,
+            type:              'STAGE_TRANSITION',
+            stageNumber:       nextNum,
+            stageName:         nextStage.name,
+            stageWeight:       toF(stageWeight),
+            harvestBsfLarvae:  toF(harvestBsfLarvae),
+            harvestFrass:      toF(harvestFrass),
+            harvestPrepupae:   toF(harvestPrepupae),
+            harvestRecycled:   toF(harvestRecycled),
+            harvestTotalKg:    harvestTotal > 0 ? harvestTotal : null,
+            notes:             notes || null,
           },
         },
       });
@@ -740,7 +787,7 @@ router.post('/batches/:id/advance-stage',
           data: {
             batchId:       id,
             action:        'BATCH_COMPLETED',
-            description:   'BSF lifecycle complete — all 5 stages finished. Batch marked inactive.',
+            description:   'BSF lifecycle complete — all 5 stages finished. Batch marked complete.',
             performedById: req.user.id,
             metadata: { lifecycleComplete: true, completedAt: now.toISOString() },
           },

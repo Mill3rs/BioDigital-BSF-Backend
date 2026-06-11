@@ -4,6 +4,8 @@ const { prisma } = require('../config/database');
 const { authenticate, authorize } = require('../middleware/auth');
 const { AppError } = require('../middleware/errorHandler');
 const { generateOrderNumber } = require('../utils/helpers');
+const emailService = require('../services/emailService');
+const notificationService = require('../services/notificationService');
 
 const router = express.Router();
 
@@ -189,8 +191,26 @@ router.get('/:id', authenticate, async (req, res, next) => {
     if (req.user.role === 'BUYER' && order.customerId !== req.user.id) {
       throw new AppError('Access denied', 403);
     }
+
+    // For COMPLETED orders, attach each item's product review by the buyer
+    let responseOrder = order;
+    if (order.status === 'COMPLETED') {
+      const productIds = order.items.map(i => i.variant.product.id);
+      const reviews = await prisma.productReview.findMany({
+        where: { userId: order.customerId, productId: { in: productIds } },
+        select: { productId: true, rating: true, title: true, comment: true },
+      });
+      const reviewMap = Object.fromEntries(reviews.map(r => [r.productId, r]));
+      responseOrder = {
+        ...order,
+        items: order.items.map(item => ({
+          ...item,
+          review: reviewMap[item.variant.product.id] ?? null,
+        })),
+      };
+    }
     
-    res.json({ success: true, data: order });
+    res.json({ success: true, data: responseOrder });
   } catch (error) {
     next(error);
   }
@@ -370,6 +390,98 @@ router.post('/:id/update-status', authenticate, [
       success: true,
       message: `Order status updated to ${status}`,
       data: updatedOrder
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Buyer confirms delivery and (optionally) rates the driver
+router.post('/:id/confirm-delivery', authenticate, authorize('BUYER'), [
+  body('driverRating').optional().isInt({ min: 1, max: 5 }),
+  body('driverComment').optional().isString().isLength({ max: 500 }),
+], async (req, res, next) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return res.status(400).json({ success: false, errors: errors.array() });
+  }
+
+  try {
+    const { id } = req.params;
+    const { driverRating, driverComment } = req.body;
+
+    const order = await prisma.order.findUnique({
+      where: { id },
+      select: { id: true, customerId: true, driverId: true, status: true }
+    });
+
+    if (!order) throw new AppError('Order not found', 404);
+    if (order.customerId !== req.user.id) throw new AppError('Access denied', 403);
+    if (order.status !== 'DELIVERED') {
+      throw new AppError('Order must be in DELIVERED status before you can confirm it', 400);
+    }
+
+    // Mark order as COMPLETED
+    const updatedOrder = await prisma.order.update({
+      where: { id },
+      data: { status: 'COMPLETED' },
+    });
+
+    // Update driver rating if provided
+    if (order.driverId && driverRating) {
+      const profile = await prisma.driverProfile.findUnique({
+        where: { userId: order.driverId },
+        select: { rating: true, totalDeliveries: true },
+      });
+
+      if (profile) {
+        // Rolling average: new = (old * n + new) / (n + 1)
+        const n = profile.totalDeliveries || 1;
+        const newRating = (profile.rating * n + driverRating) / (n + 1);
+        await prisma.driverProfile.update({
+          where: { userId: order.driverId },
+          data: {
+            rating: Math.round(newRating * 10) / 10,
+            totalDeliveries: { increment: 1 },
+          },
+        });
+      }
+
+      // Notify driver via in-app notification and email
+      const driver = await prisma.user.findUnique({
+        where: { id: order.driverId },
+        select: { fullName: true, email: true },
+      });
+      const fullOrder = await prisma.order.findUnique({
+        where: { id },
+        select: { orderNumber: true },
+      });
+      if (driver) {
+        const stars = '★'.repeat(driverRating) + '☆'.repeat(5 - driverRating);
+        const notifMsg = `${stars}  ${driverRating}/5 for Order #${fullOrder?.orderNumber ?? id}${
+          driverComment ? ` — "${driverComment}"` : ''
+        }`;
+        notificationService.createNotification(
+          order.driverId,
+          'New Delivery Review',
+          notifMsg,
+          'ORDER_UPDATE',
+          { orderId: id, rating: driverRating }
+        ).catch(() => {});
+        if (driver.email) {
+          emailService.sendDriverReviewEmail(driver.email, driver.fullName, {
+            rating: driverRating,
+            comment: driverComment,
+            orderNumber: fullOrder?.orderNumber ?? id,
+          }).catch(() => {});
+        }
+      }
+    }
+
+    res.json({
+      success: true,
+      message: 'Delivery confirmed. Thank you for your feedback!',
+      data: updatedOrder,
     });
   } catch (error) {
     next(error);

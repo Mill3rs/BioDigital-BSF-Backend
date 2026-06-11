@@ -4,12 +4,29 @@ const authController = require('../controllers/authController');
 const { authenticate } = require('../middleware/auth');
 const { uploadSingle } = require('../middleware/upload');
 const notificationService = require('../services/notificationService');
+const { prisma } = require('../config/database');
 
 const router = express.Router();
 
+// Public settings — no auth required (for clients to check feature flags)
+router.get('/public-settings', async (req, res, next) => {
+  try {
+    const setting = await prisma.systemSetting.findUnique({ where: { key: 'phone_auth_enabled' } });
+    const phoneAuthEnabled = setting ? setting.value === 'true' : false;
+    res.json({ success: true, data: { phoneAuthEnabled } });
+  } catch (error) { next(error); }
+});
+
 // Register
 router.post('/register', [
-  body('email').isEmail().withMessage('Valid email is required'),
+  body('email').optional({ values: 'falsy' }).isEmail().withMessage('Valid email is required'),
+  body('phoneNumber').optional({ values: 'falsy' }).notEmpty().withMessage('Valid phone number is required'),
+  body().custom((_, { req }) => {
+    if (!req.body.email && !req.body.phoneNumber) {
+      throw new Error('Email or phone number is required');
+    }
+    return true;
+  }),
   body('password').isLength({ min: 6 }).withMessage('Password must be at least 6 characters'),
   body('fullName').notEmpty().withMessage('Full name is required'),
   body('role').isIn(['FARMER', 'DRIVER', 'BUYER', 'SUPPLIER', 'ADMIN']).withMessage('Valid role is required')
@@ -17,7 +34,7 @@ router.post('/register', [
 
 // Login
 router.post('/login', [
-  body('email').isEmail().withMessage('Valid email is required'),
+  body('identifier').notEmpty().withMessage('Email or phone number is required'),
   body('password').notEmpty().withMessage('Password is required')
 ], authController.login);
 
@@ -185,5 +202,11 @@ router.post('/verify-company-code', authenticate, [
     next(error);
   }
 });
+
+// Google Sign-In / Register
+router.post('/google', [
+  body('idToken').notEmpty().withMessage('Google ID token is required'),
+  body('role').optional().isIn(['BUYER', 'SUPPLIER', 'DRIVER']).withMessage('Invalid role'),
+], authController.googleSignIn.bind(authController));
 
 module.exports = router;

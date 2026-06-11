@@ -6,20 +6,28 @@ class DriverController {
   // Get driver profile
   async getProfile(req, res, next) {
     try {
-      const profile = await prisma.driverProfile.findUnique({
-        where: { userId: req.user.id },
-        include: {
-          user: {
-            select: { id: true, fullName: true, email: true, phoneNumber: true, profileImage: true }
+      const [profile, totalWasteDelivered] = await Promise.all([
+        prisma.driverProfile.findUnique({
+          where: { userId: req.user.id },
+          include: {
+            user: {
+              select: { id: true, fullName: true, email: true, phoneNumber: true, profileImage: true }
+            }
           }
-        }
-      });
-      
+        }),
+        prisma.wasteRecord.count({
+          where: {
+            driverId: req.user.id,
+            status: { in: ['PROCESSING', 'PROCESSED', 'ACKNOWLEDGED'] }
+          }
+        })
+      ]);
+
       if (!profile) {
         throw new AppError('Driver profile not found', 404);
       }
-      
-      res.json({ success: true, data: profile });
+
+      res.json({ success: true, data: { ...profile, totalWasteDelivered } });
     } catch (error) {
       next(error);
     }

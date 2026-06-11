@@ -5,6 +5,7 @@ const { AppError } = require('../middleware/errorHandler');
 const logger = require('../utils/logger');
 const emailService = require('../services/emailService');
 const notificationService = require('../services/notificationService');
+const { OAuth2Client } = require('google-auth-library');
 
 class AuthController {
   // Register new user
@@ -12,19 +13,35 @@ class AuthController {
     try {
       const { email, password, fullName, phoneNumber, role, supplierType, organizationName } = req.body;
 
-      const existingUser = await prisma.user.findUnique({ where: { email } });
-      if (existingUser) {
-        throw new AppError('Email already registered', 400);
+      if (!email && !phoneNumber) {
+        throw new AppError('Email or phone number is required', 400);
+      }
+
+      // Check if phone auth is enabled when registering with phone only
+      if (!email && phoneNumber) {
+        const phoneAuthSetting = await prisma.systemSetting.findUnique({ where: { key: 'phone_auth_enabled' } });
+        if (!phoneAuthSetting || phoneAuthSetting.value !== 'true') {
+          throw new AppError('Phone number registration is not enabled', 403);
+        }
+      }
+
+      if (email) {
+        const existingByEmail = await prisma.user.findUnique({ where: { email } });
+        if (existingByEmail) throw new AppError('Email already registered', 400);
+      }
+      if (phoneNumber) {
+        const existingByPhone = await prisma.user.findFirst({ where: { phoneNumber } });
+        if (existingByPhone) throw new AppError('Phone number already registered', 400);
       }
 
       const hashedPassword = await bcrypt.hash(password, 10);
       
       const user = await prisma.user.create({
         data: {
-          email,
+          email: email || null,
           password: hashedPassword,
           fullName,
-          phoneNumber,
+          phoneNumber: phoneNumber || null,
           role,
           status: role === 'DRIVER' ? 'PENDING_VERIFICATION' : 'ACTIVE',
           onboardingStep: (role === 'SUPPLIER' || role === 'DRIVER') ? 'PENDING_CODE' : 'COMPLETE'
@@ -86,10 +103,12 @@ class AuthController {
   // Login user
   async login(req, res, next) {
     try {
-      const { email, password } = req.body;
+      const { identifier, password } = req.body;
 
-      const user = await prisma.user.findUnique({
-        where: { email },
+      const isEmail = identifier.includes('@');
+
+      const user = await prisma.user.findFirst({
+        where: isEmail ? { email: identifier } : { phoneNumber: identifier },
         include: {
           farm: true,
           driverProfile: true,
@@ -100,6 +119,18 @@ class AuthController {
 
       if (!user) {
         throw new AppError('Username/password is incorrect', 401);
+      }
+
+      // Phone auth setting only restricts BUYER accounts — staff can always use phone login
+      if (!isEmail && user.role === 'BUYER') {
+        const phoneAuthSetting = await prisma.systemSetting.findUnique({ where: { key: 'phone_auth_enabled' } });
+        if (!phoneAuthSetting || phoneAuthSetting.value !== 'true') {
+          throw new AppError('Phone number sign-in is not enabled', 403);
+        }
+      }
+
+      if (!user.password) {
+        throw new AppError('This account uses Google Sign-In. Please sign in with Google.', 401);
       }
 
       const isValidPassword = await bcrypt.compare(password, user.password);
@@ -126,6 +157,107 @@ class AuthController {
         message: 'Login successful',
         data: { token, refreshToken, user: userData }
       });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  // Google Sign-In / Register
+  async googleSignIn(req, res, next) {
+    try {
+      const { idToken, role } = req.body;
+      if (!idToken) throw new AppError('Google ID token is required', 400);
+
+      const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
+      let payload;
+      try {
+        const ticket = await googleClient.verifyIdToken({
+          idToken,
+          audience: process.env.GOOGLE_CLIENT_ID,
+        });
+        payload = ticket.getPayload();
+      } catch {
+        throw new AppError('Invalid Google token', 401);
+      }
+
+      const { sub: googleId, email, name, picture } = payload;
+
+      // Find existing user by googleId or matching email
+      const userSelect = {
+        id: true, email: true, fullName: true, phoneNumber: true, googleId: true,
+        profileImage: true, role: true, status: true, onboardingStep: true,
+        createdAt: true, farm: true, driverProfile: true, buyerProfile: true,
+        supplierProfile: true,
+      };
+
+      let user = await prisma.user.findFirst({
+        where: { OR: [{ googleId }, ...(email ? [{ email }] : [])] },
+        select: { ...userSelect, password: true },
+      });
+
+      if (user) {
+        if (user.status === 'SUSPENDED') throw new AppError('Account suspended. Please contact support.', 401);
+        // Link googleId to existing email-based account if not yet linked
+        if (!user.googleId) {
+          user = await prisma.user.update({
+            where: { id: user.id },
+            data: { googleId, profileImage: user.profileImage || picture || null },
+            select: { ...userSelect, password: true },
+          });
+        }
+        await prisma.user.update({ where: { id: user.id }, data: { lastLogin: new Date() } });
+        const { password: _p, ...userData } = user;
+        const token = generateToken(user.id, user.role);
+        const refreshToken = generateRefreshToken(user.id);
+        return res.json({ success: true, message: 'Login successful', data: { token, refreshToken, user: userData } });
+      }
+
+      // New user — role required (admin roles cannot self-register via Google)
+      if (!role) {
+        return res.status(400).json({ success: false, error: 'role_required', message: 'Select your role to continue' });
+      }
+      const allowedRoles = ['BUYER', 'SUPPLIER', 'DRIVER'];
+      if (!allowedRoles.includes(role)) {
+        throw new AppError('Invalid role. Must be BUYER, SUPPLIER, or DRIVER', 400);
+      }
+
+      const newUser = await prisma.user.create({
+        data: {
+          email: email || null,
+          googleId,
+          password: null,
+          fullName: name,
+          profileImage: picture || null,
+          role,
+          emailVerified: true,
+          status: role === 'DRIVER' ? 'PENDING_VERIFICATION' : 'ACTIVE',
+          onboardingStep: (role === 'SUPPLIER' || role === 'DRIVER') ? 'PENDING_CODE' : 'COMPLETE',
+        },
+        select: userSelect,
+      });
+
+      if (role === 'DRIVER') {
+        await prisma.driverProfile.create({ data: { userId: newUser.id } });
+      } else if (role === 'BUYER') {
+        await prisma.buyerProfile.create({ data: { userId: newUser.id } });
+      } else if (role === 'SUPPLIER') {
+        await prisma.supplierProfile.create({ data: { userId: newUser.id, primaryProducts: [], wasteTypes: [], supplierType: 'FARMER' } });
+      }
+
+      if (role === 'SUPPLIER' || role === 'DRIVER') {
+        const roleLabel = role === 'SUPPLIER' ? 'Supplier' : 'Driver';
+        const emoji = role === 'SUPPLIER' ? '🧑‍🌾' : '🚚';
+        notificationService.notifyAdminsAndManagers(
+          null, `New ${roleLabel} Registration ${emoji}`,
+          `${newUser.fullName} has registered via Google as a ${roleLabel} and is awaiting approval.`,
+          'SYSTEM', { userId: newUser.id, userRole: role }, 'user:registered',
+          { userId: newUser.id, fullName: newUser.fullName, role }
+        ).catch(err => logger.error('Failed to notify admins of Google registration:', err));
+      }
+
+      const token = generateToken(newUser.id, newUser.role);
+      const refreshToken = generateRefreshToken(newUser.id);
+      return res.status(201).json({ success: true, message: 'Registration successful', data: { token, refreshToken, user: newUser } });
     } catch (error) {
       next(error);
     }

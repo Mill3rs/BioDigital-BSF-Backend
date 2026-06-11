@@ -2,16 +2,17 @@
 
 ## 📚 Table of Contents
 1. [System Overview](#system-overview)
-2. [User Roles & Permissions](#user-roles--permissions)
-3. [Authentication Flow](#authentication-flow)
-4. [Farm Management Flow](#farm-management-flow)
-5. [Waste Management Flow](#waste-management-flow)
-6. [Processing Batch Flow](#processing-batch-flow)
-7. [Product Management Flow](#product-management-flow)
-8. [Order & Delivery Flow](#order--delivery-flow)
-9. [Offline Sync Flow](#offline-sync-flow)
-10. [Real-time Updates](#real-time-updates)
-11. [Complete User Journey Examples](#complete-user-journey-examples)
+2. [Database Setup](#database-setup)
+3. [User Roles & Permissions](#user-roles--permissions)
+4. [Authentication Flow](#authentication-flow)
+5. [Farm Management Flow](#farm-management-flow)
+6. [Waste Management Flow](#waste-management-flow)
+7. [Processing Batch Flow](#processing-batch-flow)
+8. [Product Management Flow](#product-management-flow)
+9. [Order & Delivery Flow](#order--delivery-flow)
+10. [Offline Sync Flow](#offline-sync-flow)
+11. [Real-time Updates](#real-time-updates)
+12. [Complete User Journey Examples](#complete-user-journey-examples)
 
 ---
 
@@ -55,6 +56,158 @@ BioDigital BSF is a comprehensive farm management system for Black Soldier Fly (
       │             │  │   Queue)    │  │   Storage)  │
       └─────────────┘  └─────────────┘  └─────────────┘
 ```
+
+---
+
+## Database Setup
+
+Two approaches are available: **Prisma** (code-first, recommended for development) and **raw SQL scripts** (for production provisioning or manual control).
+
+### Prerequisites
+
+- PostgreSQL 14+ running locally (MAMP, Homebrew, or Docker)
+- `.env` file in the backend root with:
+
+```env
+DATABASE_URL="postgresql://biodigital:your_password@localhost:5432/biodigital"
+```
+
+---
+
+### Option A — Prisma (recommended for development)
+
+Prisma reads `prisma/schema.prisma` and manages migrations via a `_prisma_migrations` table.
+
+#### First-time setup
+
+```bash
+# 1. Install dependencies
+pnpm install
+
+# 2. Generate the Prisma client from schema.prisma
+pnpm prisma:generate
+# or: npx prisma generate
+
+# 3. Create the database and apply all migrations
+pnpm prisma:migrate
+# or: npx prisma migrate dev
+# Prompts for a migration name on first run — enter anything, e.g. "init"
+
+# 4. Seed default data (super-admin, system settings, etc.)
+pnpm prisma:seed
+# or: node prisma/seed.js
+```
+
+#### After changing schema.prisma
+
+```bash
+# Create a new migration and apply it
+npx prisma migrate dev --name <describe_the_change>
+# e.g.: npx prisma migrate dev --name add_crops_to_supplier_profile
+
+# Regenerate the client to pick up new types
+pnpm prisma:generate
+```
+
+#### Production deploy (no interactive prompts)
+
+```bash
+# Applies all pending migrations without creating new ones
+pnpm prisma:migrate:prod
+# or: npx prisma migrate deploy
+```
+
+#### Useful Prisma commands
+
+| Command | Purpose |
+|---|---|
+| `npx prisma studio` | Browser-based DB explorer at http://localhost:5555 |
+| `npx prisma migrate status` | Show which migrations have/haven't been applied |
+| `npx prisma migrate diff ...` | Show diff between schema and live DB |
+| `npx prisma db pull` | Introspect live DB and update schema.prisma |
+| `npx prisma db push` | Push schema changes directly without a migration file (dev only) |
+
+---
+
+### Option B — Raw SQL scripts
+
+Scripts live in `scripts/sql/` and must be run **in numeric order**. They are grouped into two workflows: **fresh install** and **schema migration**.
+
+#### Workflow 1 — Fresh install (empty database)
+
+Run these three scripts once on a new machine or clean environment.
+
+```bash
+# Step 1 — Create the database, extensions, and all ENUM types
+#          Run as the postgres superuser
+psql -U postgres -f scripts/sql/01_create_database.sql
+
+# Step 2 — Create all 26 application tables, indexes, and triggers
+#          Run as the application user (biodigital)
+psql -U biodigital -d biodigital -f scripts/sql/02_create_tables.sql
+
+# Step 3 — Insert mandatory seed data (system settings, default roles, etc.)
+psql -U biodigital -d biodigital -f scripts/sql/03_insert_default_data.sql
+```
+
+#### Workflow 2 — Schema migration (existing live database)
+
+Use this workflow when the table structure changes and you need to preserve existing data.
+
+```bash
+# Step 4 — Rename all current tables to x_<table> backups
+psql -U biodigital -d biodigital -f scripts/sql/04_rename_database_tables.sql
+
+# Step 5 — Create the improved/updated table definitions
+psql -U biodigital -d biodigital -f scripts/sql/05_update_database_tables.sql
+
+# Step 6 — Copy data from the x_ backup tables into the new tables
+psql -U biodigital -d biodigital -f scripts/sql/06_insert_old_data_into_updated_database_tables.sql
+
+# Step 7 — Drop the x_ backup tables once data is verified
+psql -U biodigital -d biodigital -f scripts/sql/07_delete_old_tables.sql
+
+# Step 8 — Apply dashboard indexes and performance settings
+psql -U biodigital -d biodigital -f scripts/sql/08_dashboard_indexes_and_settings.sql
+```
+
+#### Nuclear option — drop everything
+
+```bash
+# Terminates all connections and drops the biodigital database entirely.
+# IRREVERSIBLE — only use on dev/staging.
+psql -U postgres -f scripts/sql/09_drop_database.sql
+```
+
+#### Granting permissions after table creation
+
+If tables were created by a different PostgreSQL user (e.g. `postgres`), the `biodigital` app user needs explicit grants:
+
+```bash
+psql -U postgres -d biodigital -c "
+GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO biodigital;
+GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO biodigital;
+GRANT USAGE ON SCHEMA public TO biodigital;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO biodigital;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO biodigital;
+"
+```
+
+---
+
+### SQL script reference
+
+| Script | Run as | Purpose |
+|---|---|---|
+| `01_create_database.sql` | `postgres` | Create DB, enable extensions, define all ENUM types |
+| `02_create_tables.sql` | `biodigital` | Create all 26 tables with constraints, indexes, triggers |
+| `03_insert_default_data.sql` | `biodigital` | Seed mandatory default records |
+| `04_rename_database_tables.sql` | `biodigital` | Backup live tables to `x_` prefix before a migration |
+| `05_update_database_tables.sql` | `biodigital` | Create the updated table definitions |
+| `06_insert_old_data_into_updated_database_tables.sql` | `biodigital` | Migrate data from `x_` backups into new tables |
+| `07_delete_old_tables.sql` | `biodigital` | Drop `x_` backup tables after data is verified |
+| `08_dashboard_indexes_and_settings.sql` | `biodigital` | Apply performance indexes and DB settings |
+| `09_drop_database.sql` | `postgres` | Drop the entire database (irreversible) |
 
 ---
 
@@ -1071,33 +1224,33 @@ This system is designed to handle the complete lifecycle of BSF farming operatio
 
 ```bash
 # 1. Create the database + extensions + ENUM types
-psql -U postgres -f scripts/sql/01_create_database.sql
+psql -U nassifdauda -d postgres -f scripts/sql/01_create_database.sql
 
 # 2. Create all original tables
-psql -U postgres -d biodigital -f scripts/sql/02_create_tables.sql
+psql -U nassifdauda -d biodigital -f scripts/sql/02_create_tables.sql
 
 # 3. Seed default system settings, super-admin, company and vehicles
-psql -U postgres -d biodigital -f scripts/sql/03_insert_default_data.sql
+psql -U nassifdauda -d biodigital -f scripts/sql/03_insert_default_data.sql
 
 # 4. Rename existing tables to x_ prefix (backs them up before schema update)
-psql -U postgres -d biodigital -f scripts/sql/04_rename_database_tables.sql
+psql -U nassifdauda -d biodigital -f scripts/sql/04_rename_database_tables.sql
 
 # 5. Create updated tables (new columns added to User, Farm, Order, etc.)
-psql -U postgres -d biodigital -f scripts/sql/05_update_database_tables.sql
+psql -U nassifdauda -d biodigital -f scripts/sql/05_update_database_tables.sql
 
 # 6. Copy data from x_ backup tables into the new updated tables
-psql -U postgres -d biodigital -f scripts/sql/06_insert_old_data_into_updated_database_tables.sql
+psql -U nassifdauda -d biodigital -f scripts/sql/06_insert_old_data_into_updated_database_tables.sql
 
 # 7. Drop the x_ backup tables (only after verifying row counts)
-psql -U postgres -d biodigital -f scripts/sql/07_delete_old_tables.sql
+psql -U nassifdauda -d biodigital -f scripts/sql/07_delete_old_tables.sql
 
 # 8. Add performance indexes and dashboard system settings
-psql -U postgres -d biodigital -f scripts/sql/08_dashboard_indexes_and_settings.sql
+psql -U nassifdauda -d biodigital -f scripts/sql/08_dashboard_indexes_and_settings.sql
 ```
 
 ### Reset / start over
 
 ```bash
 # Drop the entire database
-psql -U postgres -f scripts/sql/09_drop_database.sql
+psql -U nassifdauda -d postgres -f scripts/sql/09_drop_database.sql
 ```# BioDigital-BSF-Backend

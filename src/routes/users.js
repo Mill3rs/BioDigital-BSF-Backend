@@ -1,5 +1,7 @@
 const express = require('express');
 const { body, validationResult } = require('express-validator');
+const fs = require('fs');
+const path = require('path');
 const { prisma } = require('../config/database');
 const { authenticate, authorize } = require('../middleware/auth');
 const { AppError } = require('../middleware/errorHandler');
@@ -31,22 +33,45 @@ router.get('/profile', authenticate, async (req, res, next) => {
 // Update user profile
 router.put('/profile', authenticate, async (req, res, next) => {
   try {
-    const { fullName, phoneNumber, profileImage } = req.body;
+    const { fullName, phoneNumber, profileImage, location } = req.body;
     
     const user = await prisma.user.update({
       where: { id: req.user.id },
-      data: { fullName, phoneNumber, profileImage },
+      data: { fullName, phoneNumber, profileImage, location },
       select: {
         id: true,
         email: true,
         fullName: true,
         phoneNumber: true,
         profileImage: true,
+        location: true,
         role: true
       }
     });
     
     res.json({ success: true, data: user });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Upload profile picture (base64 JSON — avoids multipart issues on mobile)
+router.post('/upload-profile-picture', authenticate, async (req, res, next) => {
+  try {
+    const { base64, mimeType } = req.body;
+    if (!base64) return res.status(400).json({ success: false, message: 'No image data provided' });
+    const ext = mimeType === 'image/png' ? '.png' : '.jpg';
+    const filename = `profile_image-${Date.now()}-${Math.round(Math.random() * 1e9)}${ext}`;
+    const dir = path.join(process.cwd(), 'uploads', 'images', 'profiles');
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, filename), Buffer.from(base64, 'base64'));
+    const imageUrl = `/uploads/images/profiles/${filename}`;
+    const user = await prisma.user.update({
+      where: { id: req.user.id },
+      data: { profileImage: imageUrl },
+      select: { id: true, email: true, fullName: true, phoneNumber: true, profileImage: true, location: true, role: true },
+    });
+    res.json({ success: true, message: 'Profile picture updated', data: user });
   } catch (error) {
     next(error);
   }

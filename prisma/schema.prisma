@@ -10,11 +10,13 @@ datasource db {
 // User Roles and Authentication
 model User {
   id             String         @id @default(cuid())
-  email          String         @unique
-  password       String
+  email          String?        @unique
+  password       String?
+  googleId       String?        @unique
   fullName       String
   phoneNumber    String?
   profileImage   String?
+  location       String?
   role           UserRole       @default(USER)
   status         UserStatus     @default(ACTIVE)
   onboardingStep OnboardingStep @default(COMPLETE)
@@ -54,6 +56,9 @@ model User {
   cart              Cart?
   verifiedDrivers   DriverProfile[]   @relation("VerifiedDrivers")
   verifiedSuppliers SupplierProfile[] @relation("VerifiedSuppliers")
+  supportTickets    SupportTicket[]
+  payoutRequests    PayoutRequest[]   @relation("SupplierPayouts")
+  processedPayouts  PayoutRequest[]   @relation("ProcessedPayouts")
 
   @@map("Users")
 }
@@ -115,6 +120,7 @@ model Admin {
   integrations     Integration[]
   supplierProfiles SupplierProfile[]
   driverProfiles   DriverProfile[]
+  payoutRequests   PayoutRequest[]
 }
 
 enum SubscriptionStatus {
@@ -591,6 +597,7 @@ model ProductVariant {
   dimensions       Json? // { length, width, height }
   images           String[]
   isActive         Boolean  @default(true)
+  pointsCost       Int?     @map("points_cost") // Custom points cost set by admin (overrides rate-based calculation)
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
 
@@ -795,6 +802,7 @@ enum NotificationType {
   PAYMENT_CONFIRMED
   DELIVERY_UPDATE
   SYSTEM_ALERT
+  SUPPORT
 }
 
 // Offline Sync Support
@@ -885,6 +893,48 @@ enum IntegrationStatus {
   PENDING
 }
 
+// Support Tickets
+model SupportTicket {
+  id           String              @id @default(cuid())
+  ticketNumber String              @unique
+  userId       String
+  user         User                @relation(fields: [userId], references: [id])
+  userRole     String              // BUYER, DRIVER, SUPPLIER
+  category     SupportCategory
+  title        String
+  description  String
+  status       SupportStatus       @default(OPEN)
+  priority     SupportPriority     @default(MEDIUM)
+  adminNote    String?
+  resolvedAt   DateTime?
+  createdAt    DateTime            @default(now())
+  updatedAt    DateTime            @updatedAt
+}
+
+enum SupportCategory {
+  ORDER_ISSUE
+  DELIVERY_ISSUE
+  PAYMENT_ISSUE
+  PRODUCT_ISSUE
+  ACCOUNT_ISSUE
+  APP_BUG
+  OTHER
+}
+
+enum SupportStatus {
+  OPEN
+  IN_PROGRESS
+  RESOLVED
+  CLOSED
+}
+
+enum SupportPriority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
 // System Settings
 model SystemSetting {
   id          String   @id @default(cuid())
@@ -894,4 +944,27 @@ model SystemSetting {
   category    String
   updatedBy   String
   updatedAt   DateTime @updatedAt
+}
+
+// Supplier Payout Requests
+model PayoutRequest {
+  id                  String    @id @default(cuid())
+  supplierId          String
+  supplier            User      @relation("SupplierPayouts", fields: [supplierId], references: [id], onDelete: Cascade)
+  adminId             String?
+  admin               Admin?    @relation(fields: [adminId], references: [id], onDelete: SetNull)
+  points              Int
+  amountGhs           Float
+  status              String    @default("PENDING") // PENDING | APPROVED | REJECTED | PAID
+  paymentMethod       String?
+  paymentDetails      Json?
+  adminPaymentMethod  String?
+  notes               String?
+  processedAt         DateTime?
+  processedBy         String?
+  processedByUser     User?     @relation("ProcessedPayouts", fields: [processedBy], references: [id], onDelete: SetNull)
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  @@map("PayoutRequest")
 }

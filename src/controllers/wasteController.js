@@ -102,13 +102,22 @@ class WasteController {
         }
       });
       
-      if (finalFarmId) {
-        await prisma.farm.update({
-          where: { id: finalFarmId },
-          data: { totalWasteCollected: { increment: wasteRecord.quantity } }
-        });
-      }
-      
+      const finalSupplierId = wasteRecord.supplierId;
+      await Promise.all([
+        finalFarmId
+          ? prisma.farm.update({
+              where: { id: finalFarmId },
+              data: { totalWasteCollected: { increment: wasteRecord.quantity } },
+            })
+          : Promise.resolve(),
+        finalSupplierId
+          ? prisma.supplierProfile.updateMany({
+              where: { userId: finalSupplierId },
+              data: { totalWasteSupplied: { increment: wasteRecord.quantity } },
+            })
+          : Promise.resolve(),
+      ]);
+
       res.status(201).json({ success: true, data: wasteRecord });
     } catch (error) {
       next(error);
@@ -173,13 +182,21 @@ class WasteController {
       
       await prisma.wasteRecord.delete({ where: { id: req.params.id } });
       
-      if (wasteRecord.farmId) {
-        await prisma.farm.update({
-          where: { id: wasteRecord.farmId },
-          data: { totalWasteCollected: { decrement: wasteRecord.quantity } }
-        });
-      }
-      
+      await Promise.all([
+        wasteRecord.farmId
+          ? prisma.farm.update({
+              where: { id: wasteRecord.farmId },
+              data: { totalWasteCollected: { decrement: wasteRecord.quantity } },
+            })
+          : Promise.resolve(),
+        wasteRecord.supplierId
+          ? prisma.supplierProfile.updateMany({
+              where: { userId: wasteRecord.supplierId },
+              data: { totalWasteSupplied: { decrement: wasteRecord.quantity } },
+            })
+          : Promise.resolve(),
+      ]);
+
       res.json({ success: true, message: 'Waste record deleted successfully' });
     } catch (error) {
       next(error);

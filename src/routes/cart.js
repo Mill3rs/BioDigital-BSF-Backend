@@ -6,6 +6,32 @@ const { AppError } = require('../middleware/errorHandler');
 
 const router = express.Router();
 
+// Helper: fetch full cart for a user (with subtotal/total computed)
+const getFullCart = async (userId) => {
+  let cart = await prisma.cart.findUnique({
+    where: { userId },
+    include: {
+      items: {
+        include: {
+          variant: {
+            include: {
+              product: { select: { id: true, name: true, images: true, slug: true } }
+            }
+          }
+        }
+      }
+    }
+  });
+  if (!cart) {
+    cart = await prisma.cart.create({
+      data: { userId },
+      include: { items: true }
+    });
+  }
+  const subtotal = cart.items.reduce((sum, item) => sum + (item.variant?.price ?? 0) * item.quantity, 0);
+  return { ...cart, subtotal, total: subtotal };
+};
+
 // Get cart
 router.get('/', authenticate, async (req, res, next) => {
   try {
@@ -106,10 +132,11 @@ router.post('/add', authenticate, [
       });
     }
     
+    const updatedCart = await getFullCart(req.user.id);
     res.status(201).json({
       success: true,
       message: 'Item added to cart',
-      data: cartItem
+      data: updatedCart
     });
   } catch (error) {
     next(error);
@@ -142,15 +169,16 @@ router.put('/update/:itemId', authenticate, [
       throw new AppError('Unauthorized', 403);
     }
     
-    const updatedItem = await prisma.cartItem.update({
+    await prisma.cartItem.update({
       where: { id: itemId },
       data: { quantity }
     });
-    
+
+    const updatedCart = await getFullCart(req.user.id);
     res.json({
       success: true,
       message: 'Cart item updated',
-      data: updatedItem
+      data: updatedCart
     });
   } catch (error) {
     next(error);
@@ -176,10 +204,12 @@ router.delete('/remove/:itemId', authenticate, async (req, res, next) => {
     }
     
     await prisma.cartItem.delete({ where: { id: itemId } });
-    
+
+    const updatedCart = await getFullCart(req.user.id);
     res.json({
       success: true,
-      message: 'Item removed from cart'
+      message: 'Item removed from cart',
+      data: updatedCart
     });
   } catch (error) {
     next(error);

@@ -8,9 +8,29 @@ const logger = require('../utils/logger');
 
 const router = express.Router();
 
+// ── Period filter helper ──────────────────────────────────────────────────────
+// Returns a Date for the start of the requested period, or null for all-time.
+function periodStart(period) {
+  const now = new Date();
+  switch (period) {
+    case 'daily':   { const d = new Date(now); d.setHours(0,0,0,0); return d; }
+    case 'weekly':  { const d = new Date(now); d.setDate(now.getDate() - 7); return d; }
+    case 'monthly': { const d = new Date(now); d.setMonth(now.getMonth() - 1); return d; }
+    case 'yearly':  { const d = new Date(now); d.setFullYear(now.getFullYear() - 1); return d; }
+    default: return null; // all-time
+  }
+}
+
 // Get system statistics (Super Admin only)
 router.get('/stats', authenticate, authorize('SUPER_ADMIN'), async (req, res, next) => {
   try {
+    const since = periodStart(req.query.period);
+    const dateFilter = since ? { gte: since } : undefined;
+    const wasteWhere   = dateFilter ? { date: dateFilter }      : {};
+    const orderWhere   = { status: 'COMPLETED', ...(dateFilter ? { createdAt: dateFilter } : {}) };
+    const userWhere    = dateFilter ? { createdAt: dateFilter } : {};
+    const processWhere = dateFilter ? { startDate: dateFilter } : {};
+
     const [
       totalUsers,
       totalFarms,
@@ -19,16 +39,23 @@ router.get('/stats', authenticate, authorize('SUPER_ADMIN'), async (req, res, ne
       totalOrders,
       totalRevenue,
       activeAdmins,
-      systemHealth
+      systemHealth,
+      supportCounts,
     ] = await Promise.all([
-      prisma.user.count(),
+      prisma.user.count({ where: userWhere }),
       prisma.farm.count(),
-      prisma.wasteRecord.count(),
-      prisma.processingBatch.count(),
-      prisma.order.count({ where: { status: 'COMPLETED' } }),
-      prisma.order.aggregate({ where: { status: 'COMPLETED' }, _sum: { total: true } }),
+      prisma.wasteRecord.count({ where: wasteWhere }),
+      prisma.processingBatch.count({ where: processWhere }),
+      prisma.order.count({ where: orderWhere }),
+      prisma.order.aggregate({ where: orderWhere, _sum: { total: true } }),
       prisma.admin.count({ where: { subscription: 'ACTIVE' } }),
-      prisma.$queryRaw`SELECT NOW() as time, pg_database_size(current_database())::float8 as db_size`
+      prisma.$queryRaw`SELECT NOW() as time, pg_database_size(current_database())::float8 as db_size`,
+      Promise.all([
+        prisma.supportTicket.count({ where: { status: 'OPEN',        ...(dateFilter ? { createdAt: dateFilter } : {}) } }),
+        prisma.supportTicket.count({ where: { status: 'IN_PROGRESS', ...(dateFilter ? { createdAt: dateFilter } : {}) } }),
+        prisma.supportTicket.count({ where: { status: 'RESOLVED',    ...(dateFilter ? { createdAt: dateFilter } : {}) } }),
+        prisma.supportTicket.count({ where: { status: 'CLOSED',      ...(dateFilter ? { createdAt: dateFilter } : {}) } }),
+      ]),
     ]);
     
     // Get daily active users (last 7 days)
@@ -52,22 +79,36 @@ router.get('/stats', authenticate, authorize('SUPER_ADMIN'), async (req, res, ne
     const wasteTrend = wasteTrendRaw.map((r) => ({ month: r.month, total: Number(r.total) }));
 
     const processingOutputs = await prisma.processingBatch.aggregate({
+      where: processWhere,
       _sum: { larvaeOutput: true, fertilizerOutput: true },
     });
+
+    const wasteAgg = await prisma.wasteRecord.aggregate({
+      where: wasteWhere,
+      _sum: { quantity: true, carbonSaved: true },
+    });
+
+    const [ticketOpen, ticketInProgress, ticketResolved, ticketClosed] = supportCounts;
     
     res.json({
       success: true,
       data: {
         users: { total: totalUsers, active: activeUsers },
         farms: { total: totalFarms, activeAdmins },
-        waste: { totalRecords: totalWasteRecords, monthlyTrend: wasteTrend },
+        waste: {
+          totalRecords: totalWasteRecords,
+          totalWaste: wasteAgg._sum.quantity || 0,
+          totalCarbonSaved: wasteAgg._sum.carbonSaved || 0,
+          monthlyTrend: wasteTrend,
+        },
         processing: {
           totalBatches: totalProcessingBatches,
           totalLarvaeOutput: processingOutputs._sum.larvaeOutput || 0,
           totalFertilizerOutput: processingOutputs._sum.fertilizerOutput || 0,
         },
         sales: { totalOrders, totalRevenue: totalRevenue._sum.total || 0 },
-        system: systemHealth[0]
+        support: { open: ticketOpen, inProgress: ticketInProgress, resolved: ticketResolved, closed: ticketClosed, total: ticketOpen + ticketInProgress + ticketResolved + ticketClosed },
+        system: systemHealth[0],
       }
     });
   } catch (error) {
@@ -90,11 +131,33 @@ router.get('/stats/summary', authenticate, authorize('ADMIN', 'MANAGER'), async 
     });
     const farmIds = adminFarms.map((f) => f.id);
 
+    const since = periodStart(req.query.period);
+    const dateFilter = since ? { gte: since } : undefined;
+
     const sevenDaysAgo = new Date();
     sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
 
     const orgUserWhere = { managedById: adminId };
-    const farmWhere = farmIds.length > 0 ? { farmId: { in: farmIds } } : { farmId: null };
+    const wasteWhere = {
+      ...(farmIds.length > 0 ? { farmId: { in: farmIds } } : { farmId: null }),
+      ...(dateFilter ? { date: dateFilter } : {}),
+    };
+    const processWhere = {
+      ...(farmIds.length > 0 ? { farmId: { in: farmIds } } : {}),
+      ...(dateFilter ? { startDate: dateFilter } : {}),
+    };
+    const orderWhere = {
+      status: 'COMPLETED',
+      ...(dateFilter ? { createdAt: dateFilter } : {}),
+    };
+    const orgUserCreatedWhere = {
+      ...orgUserWhere,
+      ...(dateFilter ? { createdAt: dateFilter } : {}),
+    };
+    const supportWhere = {
+      user: { managedById: adminId },
+      ...(dateFilter ? { createdAt: dateFilter } : {}),
+    };
 
     const [
       usersByRole,
@@ -107,11 +170,12 @@ router.get('/stats/summary', authenticate, authorize('ADMIN', 'MANAGER'), async 
       orderRevenue,
       monthlyWasteRaw,
       processingMonthlyRaw,
+      supportCounts,
     ] = await Promise.all([
       Promise.all(
         ['ADMIN', 'MANAGER', 'DRIVER', 'SUPPLIER', 'BUYER'].map(async (role) => ({
           role,
-          count: await prisma.user.count({ where: { ...orgUserWhere, role } }),
+          count: await prisma.user.count({ where: { ...orgUserCreatedWhere, role } }),
         }))
       ),
       prisma.user.count({
@@ -119,19 +183,17 @@ router.get('/stats/summary', authenticate, authorize('ADMIN', 'MANAGER'), async 
       }),
       prisma.farm.count({ where: { adminId } }),
       prisma.wasteRecord.aggregate({
-        where: farmWhere,
+        where: wasteWhere,
         _sum: { quantity: true, carbonSaved: true },
         _count: true,
       }),
       prisma.processingBatch.aggregate({
-        where: farmIds.length > 0 ? { farmId: { in: farmIds } } : {},
+        where: processWhere,
         _sum: { larvaeOutput: true, fertilizerOutput: true },
       }),
-      prisma.processingBatch.count(
-        farmIds.length > 0 ? { where: { farmId: { in: farmIds } } } : {}
-      ),
-      prisma.order.count({ where: { status: 'COMPLETED' } }),
-      prisma.order.aggregate({ where: { status: 'COMPLETED' }, _sum: { total: true } }),
+      prisma.processingBatch.count({ where: processWhere }),
+      prisma.order.count({ where: orderWhere }),
+      prisma.order.aggregate({ where: orderWhere, _sum: { total: true } }),
       farmIds.length > 0
         ? prisma.$queryRaw`
             SELECT DATE_TRUNC('month', date) as month, SUM(quantity)::float8 as total
@@ -152,6 +214,12 @@ router.get('/stats/summary', authenticate, authorize('ADMIN', 'MANAGER'), async 
             GROUP BY DATE_TRUNC('month', "startDate")
             ORDER BY month DESC`
         : Promise.resolve([]),
+      Promise.all([
+        prisma.supportTicket.count({ where: { ...supportWhere, status: 'OPEN' } }),
+        prisma.supportTicket.count({ where: { ...supportWhere, status: 'IN_PROGRESS' } }),
+        prisma.supportTicket.count({ where: { ...supportWhere, status: 'RESOLVED' } }),
+        prisma.supportTicket.count({ where: { ...supportWhere, status: 'CLOSED' } }),
+      ]),
     ]);
 
     const byRole = Object.fromEntries(usersByRole.map(({ role, count }) => [role, count]));
@@ -161,6 +229,7 @@ router.get('/stats/summary', authenticate, authorize('ADMIN', 'MANAGER'), async 
       larvae: Number(r.larvae ?? 0),
       fertilizer: Number(r.fertilizer ?? 0),
     }));
+    const [ticketOpen, ticketInProgress, ticketResolved, ticketClosed] = supportCounts;
 
     res.json({
       success: true,
@@ -180,8 +249,70 @@ router.get('/stats/summary', authenticate, authorize('ADMIN', 'MANAGER'), async 
           monthlyTrend: monthlyProcessingTrend,
         },
         sales: { totalOrders: orderCount, totalRevenue: orderRevenue._sum.total || 0 },
+        support: { open: ticketOpen, inProgress: ticketInProgress, resolved: ticketResolved, closed: ticketClosed, total: ticketOpen + ticketInProgress + ticketResolved + ticketClosed },
       },
     });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Get top-performing companies (Super Admin only) — ranked by total waste processed
+router.get('/top-companies', authenticate, authorize('SUPER_ADMIN'), async (req, res, next) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit) || 5, 20);
+
+    // WasteRecord.supplierId → User.id → User.managedById (= Admin.id)
+    const [wasteBySupplier, admins] = await Promise.all([
+      prisma.wasteRecord.groupBy({
+        by: ['supplierId'],
+        where: { supplierId: { not: null } },
+        _sum: { quantity: true, carbonSaved: true },
+      }),
+      prisma.admin.findMany({
+        select: { id: true, companyName: true, country: true, region: true },
+      }),
+    ]);
+
+    // Fetch Users for all supplierIds to get their managedById (adminId)
+    const supplierIds = wasteBySupplier.map((w) => w.supplierId).filter(Boolean);
+    const supplierUsers = supplierIds.length
+      ? await prisma.user.findMany({
+          where: { id: { in: supplierIds } },
+          select: { id: true, managedById: true },
+        })
+      : [];
+
+    // Build userId → adminId map
+    const userToAdmin = {};
+    supplierUsers.forEach((u) => {
+      if (u.managedById) userToAdmin[u.id] = u.managedById;
+    });
+
+    // Aggregate waste/carbon per adminId
+    const adminTotals = {};
+    wasteBySupplier.forEach((w) => {
+      const adminId = userToAdmin[w.supplierId];
+      if (!adminId) return;
+      if (!adminTotals[adminId]) adminTotals[adminId] = { totalWaste: 0, totalCarbon: 0, totalRevenue: 0 };
+      adminTotals[adminId].totalWaste += w._sum.quantity || 0;
+      adminTotals[adminId].totalCarbon += w._sum.carbonSaved || 0;
+    });
+
+    const data = admins
+      .map((admin) => ({
+        id: admin.id,
+        name: admin.companyName,
+        country: admin.country ?? null,
+        region: admin.region ?? null,
+        totalWasteCollected: adminTotals[admin.id]?.totalWaste ?? 0,
+        totalCarbonSaved: adminTotals[admin.id]?.totalCarbon ?? 0,
+        totalRevenue: adminTotals[admin.id]?.totalRevenue ?? 0,
+      }))
+      .sort((a, b) => b.totalWasteCollected - a.totalWasteCollected)
+      .slice(0, limit);
+
+    res.json({ success: true, data });
   } catch (error) {
     next(error);
   }
@@ -338,8 +469,8 @@ router.put('/admins/:adminId/subscription', authenticate, authorize('SUPER_ADMIN
   }
 });
 
-// Get audit logs (aggregated activity across the system)
-router.get('/audit-logs', authenticate, authorize('SUPER_ADMIN', 'ADMIN', 'MANAGER'), async (req, res, next) => {
+// Get audit logs (aggregated activity across the system) — Super Admin only
+router.get('/audit-logs', authenticate, authorize('SUPER_ADMIN'), async (req, res, next) => {
   try {
     const limit = Math.min(parseInt(req.query.limit ?? '100'), 200);
 
@@ -516,6 +647,196 @@ router.put('/waste-points-rate', authenticate, authorize('ADMIN', 'SUPER_ADMIN')
     });
     res.json({ success: true, message: 'Points rate updated successfully', data: { pointsPerKg: Number(setting.value) } });
   } catch (error) {
+    next(error);
+  }
+});
+
+// ─── Payout Rate (GHS per point) ─────────────────────────────────────────────
+
+// Get the payout rate per point
+router.get('/payout-rate', authenticate, authorize('ADMIN', 'MANAGER', 'SUPER_ADMIN'), async (req, res, next) => {
+  try {
+    const setting = await prisma.systemSetting.findUnique({ where: { key: 'payout_rate_per_point' } });
+    const ratePerPoint = setting ? Number(setting.value) : 0;
+    res.json({ success: true, data: { ratePerPoint } });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Set the payout rate per point
+router.put('/payout-rate', authenticate, authorize('ADMIN', 'SUPER_ADMIN'), [
+  body('ratePerPoint').isFloat({ min: 0 }).withMessage('ratePerPoint must be a non-negative number'),
+], async (req, res, next) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ success: false, errors: errors.array() });
+  try {
+    const { ratePerPoint } = req.body;
+    const setting = await prisma.systemSetting.upsert({
+      where: { key: 'payout_rate_per_point' },
+      update: { value: ratePerPoint, updatedBy: req.user.id, updatedAt: new Date() },
+      create: {
+        key: 'payout_rate_per_point',
+        value: ratePerPoint,
+        description: 'GHS cash value given to supplier per redeemed point',
+        category: 'rewards',
+        updatedBy: req.user.id,
+      },
+    });
+    res.json({ success: true, message: 'Payout rate updated successfully', data: { ratePerPoint: Number(setting.value) } });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ─── Points Reward Toggle ─────────────────────────────────────────────────────
+
+router.get('/points-reward-enabled', authenticate, authorize('ADMIN', 'MANAGER', 'SUPER_ADMIN'), async (req, res, next) => {
+  try {
+    const setting = await prisma.systemSetting.findUnique({ where: { key: 'points_reward_enabled' } });
+    const enabled = setting ? setting.value === 'true' : true; // default on
+    res.json({ success: true, data: { enabled } });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.put('/points-reward-enabled', authenticate, authorize('ADMIN', 'SUPER_ADMIN'), [
+  body('enabled').isBoolean().withMessage('enabled must be a boolean'),
+], async (req, res, next) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ success: false, errors: errors.array() });
+  try {
+    const { enabled } = req.body;
+    await prisma.systemSetting.upsert({
+      where: { key: 'points_reward_enabled' },
+      update: { value: String(enabled), updatedBy: req.user.id, updatedAt: new Date() },
+      create: {
+        key: 'points_reward_enabled',
+        value: String(enabled),
+        description: 'Whether the points reward system is active for suppliers',
+        category: 'rewards',
+        updatedBy: req.user.id,
+      },
+    });
+    res.json({ success: true, message: `Points reward ${enabled ? 'enabled' : 'disabled'} successfully`, data: { enabled } });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ─── Enabled Payout Methods ───────────────────────────────────────────────────
+
+router.get('/payout-methods', authenticate, authorize('ADMIN', 'MANAGER', 'SUPER_ADMIN'), async (req, res, next) => {
+  try {
+    const setting = await prisma.systemSetting.findUnique({ where: { key: 'payout_methods_enabled' } });
+    const methods = setting ? JSON.parse(setting.value) : ['mobile_money'];
+    res.json({ success: true, data: { methods } });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.put('/payout-methods', authenticate, authorize('ADMIN', 'SUPER_ADMIN'), [
+  body('methods').isArray({ min: 1 }).withMessage('methods must be a non-empty array'),
+  body('methods.*').isIn(['mobile_money', 'fertilizer', 'animal_feed']).withMessage('Invalid payout method'),
+], async (req, res, next) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ success: false, errors: errors.array() });
+  try {
+    const { methods } = req.body;
+    await prisma.systemSetting.upsert({
+      where: { key: 'payout_methods_enabled' },
+      update: { value: JSON.stringify(methods), updatedBy: req.user.id, updatedAt: new Date() },
+      create: {
+        key: 'payout_methods_enabled',
+        value: JSON.stringify(methods),
+        description: 'Payout methods available to suppliers (mobile_money, fertilizer, animal_feed)',
+        category: 'rewards',
+        updatedBy: req.user.id,
+      },
+    });
+    res.json({ success: true, message: 'Payout methods updated successfully', data: { methods } });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ─── Payout Minimum Points ────────────────────────────────────────────────────
+
+router.get('/payout-minimum-points', authenticate, authorize('ADMIN', 'MANAGER', 'SUPER_ADMIN'), async (req, res, next) => {
+  try {
+    const [minSetting, rateSetting] = await Promise.all([
+      prisma.systemSetting.findUnique({ where: { key: 'payout_minimum_points' } }),
+      prisma.systemSetting.findUnique({ where: { key: 'payout_rate_per_point' } }),
+    ]);
+    const minimumPoints = minSetting ? Number(minSetting.value) : 0;
+    const ratePerPoint = rateSetting ? Number(rateSetting.value) : 0;
+
+    // Return active products with their variants so admin can cross-reference prices
+    const products = await prisma.product.findMany({
+      where: { status: 'ACTIVE', deletedAt: null },
+      select: {
+        id: true,
+        name: true,
+        category: true,
+        variants: {
+          where: { isActive: true },
+          select: { id: true, name: true, price: true, unitType: true, unitValue: true, pointsCost: true },
+          orderBy: { price: 'asc' },
+        },
+      },
+      orderBy: { name: 'asc' },
+    });
+
+    res.json({ success: true, data: { minimumPoints, ratePerPoint, products } });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.put('/payout-minimum-points', authenticate, authorize('ADMIN', 'SUPER_ADMIN'), [
+  body('minimumPoints').isInt({ min: 0 }).withMessage('minimumPoints must be a non-negative integer'),
+], async (req, res, next) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ success: false, errors: errors.array() });
+  try {
+    const { minimumPoints } = req.body;
+    await prisma.systemSetting.upsert({
+      where: { key: 'payout_minimum_points' },
+      update: { value: String(minimumPoints), updatedBy: req.user.id, updatedAt: new Date() },
+      create: {
+        key: 'payout_minimum_points',
+        value: String(minimumPoints),
+        description: 'Minimum points a supplier must have before they can request a payout',
+        category: 'rewards',
+        updatedBy: req.user.id,
+      },
+    });
+    res.json({ success: true, message: 'Minimum payout points updated', data: { minimumPoints } });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ─── Product Variant Points Cost ─────────────────────────────────────────────
+
+router.put('/product-variants/:id/points-cost', authenticate, authorize('ADMIN', 'SUPER_ADMIN'), [
+  body('pointsCost').if(body('pointsCost').exists()).isInt({ min: 0 }).withMessage('pointsCost must be a non-negative integer or null'),
+], async (req, res, next) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ success: false, errors: errors.array() });
+  try {
+    const { id } = req.params;
+    const pointsCost = req.body.pointsCost === null || req.body.pointsCost === undefined ? null : Number(req.body.pointsCost);
+    const variant = await prisma.productVariant.update({
+      where: { id },
+      data: { pointsCost },
+      select: { id: true, name: true, pointsCost: true },
+    });
+    res.json({ success: true, message: 'Points cost updated', data: variant });
+  } catch (error) {
+    if (error.code === 'P2025') return res.status(404).json({ success: false, message: 'Variant not found' });
     next(error);
   }
 });
@@ -936,6 +1257,7 @@ router.get('/users', authenticate, authorize('SUPER_ADMIN', 'ADMIN', 'MANAGER'),
           email: true,
           fullName: true,
           phoneNumber: true,
+          location: true,
           role: true,
           status: true,
           profileImage: true,
@@ -993,7 +1315,7 @@ router.post(
       return res.status(400).json({ success: false, errors: errors.array() });
     }
     try {
-      const { email, password, fullName, phoneNumber, role } = req.body;
+      const { email, password, fullName, phoneNumber, location, role } = req.body;
       const { allowedRoles } = userScope(req.user);
 
       if (!allowedRoles.includes(role)) {
@@ -1027,8 +1349,8 @@ router.post(
       }
 
       const user = await prisma.user.create({
-        data: { email, password: hashedPassword, fullName, phoneNumber, role, status: 'ACTIVE', managedById, onboardingStep: role === 'ADMIN' ? 'PENDING_PROFILE' : 'COMPLETE' },
-        select: { id: true, email: true, fullName: true, phoneNumber: true, role: true, status: true, onboardingStep: true, createdAt: true, managedById: true },
+        data: { email, password: hashedPassword, fullName, phoneNumber, location, role, status: 'ACTIVE', managedById, onboardingStep: role === 'ADMIN' ? 'PENDING_PROFILE' : 'COMPLETE' },
+        select: { id: true, email: true, fullName: true, phoneNumber: true, location: true, role: true, status: true, onboardingStep: true, createdAt: true, managedById: true },
       });
 
       // Create role-specific profile
@@ -1152,11 +1474,11 @@ router.delete('/users/:id', authenticate, authorize('SUPER_ADMIN', 'ADMIN', 'MAN
 router.put('/users/:id', authenticate, authorize('SUPER_ADMIN', 'ADMIN'), async (req, res, next) => {
   try {
     await assertOwnership(req.user, req.params.id);
-    const { fullName, phoneNumber, status } = req.body; // role changes not permitted here
+    const { fullName, phoneNumber, location, status } = req.body; // role changes not permitted here
     const user = await prisma.user.update({
       where: { id: req.params.id },
-      data: { fullName, phoneNumber, status },
-      select: { id: true, email: true, fullName: true, phoneNumber: true, role: true, status: true },
+      data: { fullName, phoneNumber, location, status },
+      select: { id: true, email: true, fullName: true, phoneNumber: true, location: true, role: true, status: true },
     });
     res.json({ success: true, data: user });
   } catch (error) {
@@ -1219,6 +1541,46 @@ router.patch(
     }
   },
 );
+
+// ─── Company Location (ADMIN / MANAGER) ──────────────────────────────────────
+// Get current processing center location
+router.get('/company-location', authenticate, authorize('ADMIN', 'MANAGER'), async (req, res, next) => {
+  try {
+    const adminId = req.user.adminManaged?.id;
+    if (!adminId) throw new AppError('Admin profile not found', 404);
+    const admin = await prisma.admin.findUnique({
+      where: { id: adminId },
+      select: { companyName: true, address: true, city: true, country: true, region: true, lat: true, lng: true },
+    });
+    if (!admin) throw new AppError('Admin profile not found', 404);
+    res.json({ success: true, data: admin });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Update processing center location (ADMIN only)
+router.put('/company-location', authenticate, authorize('ADMIN'), async (req, res, next) => {
+  try {
+    const adminId = req.user.adminManaged?.id;
+    if (!adminId) throw new AppError('Admin profile not found', 404);
+    const { address, city, country, region, lat, lng } = req.body;
+    if (lat != null && (typeof lat !== 'number' || lat < -90 || lat > 90)) {
+      throw new AppError('Invalid latitude', 400);
+    }
+    if (lng != null && (typeof lng !== 'number' || lng < -180 || lng > 180)) {
+      throw new AppError('Invalid longitude', 400);
+    }
+    const admin = await prisma.admin.update({
+      where: { id: adminId },
+      data: { address, city, country, region, lat, lng },
+      select: { companyName: true, address: true, city: true, country: true, region: true, lat: true, lng: true },
+    });
+    res.json({ success: true, message: 'Company location updated', data: admin });
+  } catch (error) {
+    next(error);
+  }
+});
 
 // ─── Company Invite Code (ADMIN role only) ────────────────────────────────────
 // Get current invite code for the logged-in admin
@@ -1306,9 +1668,13 @@ router.get('/users/onboarding-trend', authenticate, authorize('SUPER_ADMIN', 'AD
 router.get('/rewards/stats', authenticate, authorize('SUPER_ADMIN', 'ADMIN', 'MANAGER'), async (req, res, next) => {
   try {
     const isSuperAdmin = req.user.role === 'SUPER_ADMIN';
-    const adminId = req.user.adminManaged?.id;
 
-    const where = isSuperAdmin ? {} : adminId ? { adminId } : { adminId: null };
+    // Scope via User.managedById — SupplierProfile.adminId is unreliable (often null)
+    let where = {};
+    if (!isSuperAdmin) {
+      const adminId = req.user.adminManaged?.id ?? req.user.farm?.adminId ?? null;
+      where = adminId ? { user: { managedById: adminId } } : { user: { managedById: null } };
+    }
 
     const agg = await prisma.supplierProfile.aggregate({
       where,
@@ -1331,6 +1697,75 @@ router.get('/rewards/stats', authenticate, authorize('SUPER_ADMIN', 'ADMIN', 'MA
   } catch (error) {
     next(error);
   }
+});
+
+// ─── Delivery Price ───────────────────────────────────────────────────────────
+
+// Get delivery price
+router.get('/delivery-price', authenticate, authorize('ADMIN', 'MANAGER', 'SUPER_ADMIN'), async (req, res, next) => {
+  try {
+    const setting = await prisma.systemSetting.findUnique({ where: { key: 'delivery_price' } });
+    const price = setting ? Number(setting.value) : 0;
+    res.json({ success: true, data: { price } });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Set delivery price
+router.put('/delivery-price', authenticate, authorize('ADMIN', 'MANAGER', 'SUPER_ADMIN'), [
+  body('price').isFloat({ min: 0 }).withMessage('price must be a non-negative number'),
+], async (req, res, next) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ success: false, errors: errors.array() });
+  try {
+    const { price } = req.body;
+    const setting = await prisma.systemSetting.upsert({
+      where: { key: 'delivery_price' },
+      update: { value: String(price), updatedBy: req.user.id, updatedAt: new Date() },
+      create: {
+        key: 'delivery_price',
+        value: String(price),
+        description: 'Fixed delivery fee charged to buyers per order (GHS)',
+        category: 'orders',
+        updatedBy: req.user.id,
+      },
+    });
+    res.json({ success: true, message: 'Delivery price updated', data: { price: Number(setting.value) } });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ── Auth settings (phone auth) ──────────────────────────────────────────────
+router.get('/auth-settings', authenticate, authorize('ADMIN', 'MANAGER', 'SUPER_ADMIN'), async (req, res, next) => {
+  try {
+    const setting = await prisma.systemSetting.findUnique({ where: { key: 'phone_auth_enabled' } });
+    const phoneAuthEnabled = setting ? setting.value === 'true' : false;
+    res.json({ success: true, data: { phoneAuthEnabled } });
+  } catch (error) { next(error); }
+});
+
+router.put('/auth-settings', authenticate, authorize('ADMIN', 'SUPER_ADMIN'), [
+  body('phoneAuthEnabled').isBoolean().withMessage('phoneAuthEnabled must be a boolean'),
+], async (req, res, next) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ success: false, errors: errors.array() });
+  try {
+    const { phoneAuthEnabled } = req.body;
+    await prisma.systemSetting.upsert({
+      where: { key: 'phone_auth_enabled' },
+      update: { value: String(phoneAuthEnabled), updatedBy: req.user.id, updatedAt: new Date() },
+      create: {
+        key: 'phone_auth_enabled',
+        value: String(phoneAuthEnabled),
+        description: 'Allow users to register and sign in with a phone number',
+        category: 'auth',
+        updatedBy: req.user.id,
+      },
+    });
+    res.json({ success: true, message: 'Auth settings updated', data: { phoneAuthEnabled } });
+  } catch (error) { next(error); }
 });
 
 module.exports = router;
