@@ -1,44 +1,59 @@
-const express = require('express');
-const { prisma } = require('../config/database');
-const { authenticate, authorize } = require('../middleware/auth');
-const { AppError } = require('../middleware/errorHandler');
-const notificationService = require('../services/notificationService');
-const emailService = require('../services/emailService');
-const { broadcastToRole, sendToUser } = require('../sockets/helpers');
+const express = require("express");
+const { prisma } = require("../config/database");
+const { authenticate, authorize } = require("../middleware/auth");
+const { AppError } = require("../middleware/errorHandler");
+const notificationService = require("../services/notificationService");
+const emailService = require("../services/emailService");
+const { broadcastToRole, sendToUser } = require("../sockets/helpers");
 
 const router = express.Router();
 
-const ADMIN_ROLES = ['SUPER_ADMIN', 'ADMIN', 'MANAGER'];
-const USER_ROLES = ['BUYER', 'DRIVER', 'SUPPLIER'];
+const ADMIN_ROLES = ["SUPER_ADMIN", "ADMIN", "MANAGER"];
+const USER_ROLES = ["BUYER", "DRIVER", "SUPPLIER"];
 
 // Generate a ticket number: SUP-YYYYMMDD-XXXX
 function generateTicketNumber() {
-  const date = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+  const date = new Date().toISOString().slice(0, 10).replace(/-/g, "");
   const suffix = Math.random().toString(36).slice(2, 6).toUpperCase();
   return `SUP-${date}-${suffix}`;
 }
 
 // POST /api/support — create a ticket (buyers, drivers, suppliers)
-router.post('/', authenticate, async (req, res, next) => {
+router.post("/", authenticate, async (req, res, next) => {
   try {
     const { role } = req.user;
     if (!USER_ROLES.includes(role)) {
-      throw new AppError('Only buyers, drivers and suppliers can submit support tickets', 403);
+      throw new AppError(
+        "Only buyers, drivers and suppliers can submit support tickets",
+        403,
+      );
     }
 
     const { category, title, description, priority } = req.body;
 
     if (!category || !title || !description) {
-      throw new AppError('category, title and description are required', 400);
+      throw new AppError("category, title and description are required", 400);
     }
 
-    const validCategories = ['ORDER_ISSUE', 'DELIVERY_ISSUE', 'PAYMENT_ISSUE', 'PRODUCT_ISSUE', 'ACCOUNT_ISSUE', 'APP_BUG', 'OTHER'];
+    const validCategories = [
+      "ORDER_ISSUE",
+      "DELIVERY_ISSUE",
+      "PAYMENT_ISSUE",
+      "PRODUCT_ISSUE",
+      "ACCOUNT_ISSUE",
+      "APP_BUG",
+      "OTHER",
+    ];
     if (!validCategories.includes(category)) {
-      throw new AppError(`Invalid category. Must be one of: ${validCategories.join(', ')}`, 400);
+      throw new AppError(
+        `Invalid category. Must be one of: ${validCategories.join(", ")}`,
+        400,
+      );
     }
 
-    const validPriorities = ['LOW', 'MEDIUM', 'HIGH', 'URGENT'];
-    const resolvedPriority = priority && validPriorities.includes(priority) ? priority : 'MEDIUM';
+    const validPriorities = ["LOW", "MEDIUM", "HIGH", "URGENT"];
+    const resolvedPriority =
+      priority && validPriorities.includes(priority) ? priority : "MEDIUM";
 
     const ticket = await prisma.supportTicket.create({
       data: {
@@ -59,24 +74,30 @@ router.post('/', authenticate, async (req, res, next) => {
     setImmediate(async () => {
       try {
         const admins = await prisma.user.findMany({
-          where: { role: { in: ['SUPER_ADMIN', 'ADMIN', 'MANAGER'] } },
+          where: { role: { in: ["SUPER_ADMIN", "ADMIN", "MANAGER"] } },
           select: { id: true, fullName: true, email: true },
         });
 
-        const adminIds = admins.map(a => a.id);
+        const adminIds = admins.map((a) => a.id);
         if (adminIds.length) {
           await notificationService.sendBulkNotifications(
             adminIds,
-            '📋 New Support Ticket',
-            `${ticket.userRole} ${ticket.user?.fullName ?? 'Unknown'} submitted a ${ticket.priority} priority ticket: "${ticket.title}" [${ticket.ticketNumber}]`,
-            'SUPPORT',
-            { ticketId: ticket.id, ticketNumber: ticket.ticketNumber, priority: ticket.priority },
+            "📋 New Support Ticket",
+            `${ticket.userRole} ${ticket.user?.fullName ?? "Unknown"} submitted a ${ticket.priority} priority ticket: "${ticket.title}" [${ticket.ticketNumber}]`,
+            "SUPPORT",
+            {
+              ticketId: ticket.id,
+              ticketNumber: ticket.ticketNumber,
+              priority: ticket.priority,
+            },
           );
         }
 
         for (const admin of admins) {
           if (admin.email) {
-            emailService.sendSupportTicketAdminEmail(admin.email, admin.fullName, ticket).catch(() => {});
+            emailService
+              .sendSupportTicketAdminEmail(admin.email, admin.fullName, ticket)
+              .catch(() => {});
           }
         }
 
@@ -88,12 +109,14 @@ router.post('/', authenticate, async (req, res, next) => {
           priority: ticket.priority,
           category: ticket.category,
           userRole: ticket.userRole,
-          userName: ticket.user?.fullName ?? 'Unknown',
+          userName: ticket.user?.fullName ?? "Unknown",
         };
-        broadcastToRole('ADMIN', 'support:new', socketPayload);
-        broadcastToRole('MANAGER', 'support:new', socketPayload);
-        broadcastToRole('SUPER_ADMIN', 'support:new', socketPayload);
-      } catch (_) { /* non-fatal */ }
+        broadcastToRole("ADMIN", "support:new", socketPayload);
+        broadcastToRole("MANAGER", "support:new", socketPayload);
+        broadcastToRole("SUPER_ADMIN", "support:new", socketPayload);
+      } catch (_) {
+        /* non-fatal */
+      }
     });
 
     res.status(201).json({ success: true, data: ticket });
@@ -105,7 +128,7 @@ router.post('/', authenticate, async (req, res, next) => {
 // GET /api/support — list tickets
 //   - BUYER/DRIVER/SUPPLIER → own tickets only
 //   - ADMIN/MANAGER/SUPER_ADMIN → all tickets with optional filters
-router.get('/', authenticate, async (req, res, next) => {
+router.get("/", authenticate, async (req, res, next) => {
   try {
     const { role } = req.user;
     const { status, priority, page = 1, limit = 20 } = req.query;
@@ -115,7 +138,7 @@ router.get('/', authenticate, async (req, res, next) => {
     if (USER_ROLES.includes(role)) {
       where.userId = req.user.id;
     } else if (!ADMIN_ROLES.includes(role)) {
-      throw new AppError('Unauthorized', 403);
+      throw new AppError("Unauthorized", 403);
     }
 
     if (status) where.status = status;
@@ -126,7 +149,7 @@ router.get('/', authenticate, async (req, res, next) => {
     const [tickets, total] = await Promise.all([
       prisma.supportTicket.findMany({
         where,
-        orderBy: { createdAt: 'desc' },
+        orderBy: { createdAt: "desc" },
         skip,
         take: parseInt(limit),
         include: {
@@ -152,7 +175,7 @@ router.get('/', authenticate, async (req, res, next) => {
 });
 
 // GET /api/support/:id — single ticket
-router.get('/:id', authenticate, async (req, res, next) => {
+router.get("/:id", authenticate, async (req, res, next) => {
   try {
     const { id } = req.params;
     const { role } = req.user;
@@ -162,11 +185,11 @@ router.get('/:id', authenticate, async (req, res, next) => {
       include: { user: { select: { id: true, fullName: true, email: true } } },
     });
 
-    if (!ticket) throw new AppError('Ticket not found', 404);
+    if (!ticket) throw new AppError("Ticket not found", 404);
 
     // Non-admin users can only view their own tickets
     if (USER_ROLES.includes(role) && ticket.userId !== req.user.id) {
-      throw new AppError('Ticket not found', 404);
+      throw new AppError("Ticket not found", 404);
     }
 
     res.json({ success: true, data: ticket });
@@ -176,26 +199,29 @@ router.get('/:id', authenticate, async (req, res, next) => {
 });
 
 // PATCH /api/support/:id/status — admin updates status / note
-router.patch('/:id/status', authenticate, async (req, res, next) => {
+router.patch("/:id/status", authenticate, async (req, res, next) => {
   try {
     if (!ADMIN_ROLES.includes(req.user.role)) {
-      throw new AppError('Admin access required', 403);
+      throw new AppError("Admin access required", 403);
     }
 
     const { id } = req.params;
     const { status, adminNote } = req.body;
 
-    const validStatuses = ['OPEN', 'IN_PROGRESS', 'RESOLVED', 'CLOSED'];
+    const validStatuses = ["OPEN", "IN_PROGRESS", "RESOLVED", "CLOSED"];
     if (!status || !validStatuses.includes(status)) {
-      throw new AppError(`Invalid status. Must be one of: ${validStatuses.join(', ')}`, 400);
+      throw new AppError(
+        `Invalid status. Must be one of: ${validStatuses.join(", ")}`,
+        400,
+      );
     }
 
     const ticket = await prisma.supportTicket.findUnique({ where: { id } });
-    if (!ticket) throw new AppError('Ticket not found', 404);
+    if (!ticket) throw new AppError("Ticket not found", 404);
 
     const updateData = { status };
     if (adminNote !== undefined) updateData.adminNote = adminNote;
-    if (status === 'RESOLVED' || status === 'CLOSED') {
+    if (status === "RESOLVED" || status === "CLOSED") {
       updateData.resolvedAt = new Date();
     }
 
@@ -208,34 +234,46 @@ router.patch('/:id/status', authenticate, async (req, res, next) => {
     // ── Notify the ticket owner of the status change ──────────────────────
     setImmediate(async () => {
       try {
-        const statusLabel = { OPEN: 'Open', IN_PROGRESS: 'In Progress', RESOLVED: 'Resolved', CLOSED: 'Closed' }[status] || status;
-        const noteSnippet = updated.adminNote ? ` — "${updated.adminNote.slice(0, 80)}${updated.adminNote.length > 80 ? '…' : ''}"` : '';
+        const statusLabel =
+          {
+            OPEN: "Open",
+            IN_PROGRESS: "In Progress",
+            RESOLVED: "Resolved",
+            CLOSED: "Closed",
+          }[status] || status;
+        const noteSnippet = updated.adminNote
+          ? ` — "${updated.adminNote.slice(0, 80)}${updated.adminNote.length > 80 ? "…" : ""}"`
+          : "";
 
         await notificationService.createNotification(
           updated.userId,
-          '🔔 Support Ticket Updated',
+          "🔔 Support Ticket Updated",
           `Your ticket ${updated.ticketNumber} is now ${statusLabel}${noteSnippet}`,
-          'SUPPORT',
+          "SUPPORT",
           { ticketId: updated.id, ticketNumber: updated.ticketNumber, status },
         );
 
         if (updated.user?.email) {
-          emailService.sendSupportTicketStatusUpdateEmail(
-            updated.user.email,
-            updated.user.fullName ?? 'User',
-            updated,
-          ).catch(() => {});
+          emailService
+            .sendSupportTicketStatusUpdateEmail(
+              updated.user.email,
+              updated.user.fullName ?? "User",
+              updated,
+            )
+            .catch(() => {});
         }
 
         // Real-time socket push to the ticket owner (mobile app)
-        sendToUser(updated.userId, 'support:status', {
+        sendToUser(updated.userId, "support:status", {
           ticketId: updated.id,
           ticketNumber: updated.ticketNumber,
           status: updated.status,
           statusLabel,
           adminNote: updated.adminNote ?? null,
         });
-      } catch (_) { /* non-fatal */ }
+      } catch (_) {
+        /* non-fatal */
+      }
     });
 
     res.json({ success: true, data: updated });
@@ -245,3 +283,69 @@ router.patch('/:id/status', authenticate, async (req, res, next) => {
 });
 
 module.exports = router;
+
+// POST /api/support/demo-request — public, no auth required
+router.post("/demo-request", async (req, res) => {
+  try {
+    const { name, email, company, date, time } = req.body;
+    if (!name || !email || !date || !time) {
+      return res
+        .status(400)
+        .json({ success: false, message: "All fields are required." });
+    }
+
+    // Log to console and send email notification
+    console.log(
+      `\n📅 DEMO REQUEST:\n  Name: ${name}\n  Email: ${email}\n  Company: ${company || "N/A"}\n  Date: ${date}\n  Time: ${time}\n`,
+    );
+
+    // Send email to okumkom233@gmail.com
+    emailService
+      .sendEmail(
+        "okumkom233@gmail.com",
+        "New Demo Request — Biodigital BSF",
+        `<h2>New Demo Request</h2>
+        <p><strong>Name:</strong> ${name}</p>
+        <p><strong>Email:</strong> ${email}</p>
+        <p><strong>Company:</strong> ${company || "N/A"}</p>
+        <p><strong>Date:</strong> ${date}</p>
+        <p><strong>Time:</strong> ${time}</p>`,
+      )
+      .catch(() => {});
+
+    // Also notify admins
+    try {
+      const admins = await prisma.user.findMany({
+        where: { role: { in: ["SUPER_ADMIN", "ADMIN"] }, status: "ACTIVE" },
+        select: { id: true, email: true },
+      });
+      for (const admin of admins) {
+        if (admin.email && admin.email !== "okumkom233@gmail.com") {
+          emailService
+            .sendEmail(
+              admin.email,
+              "New Demo Request",
+              `
+            <h2>New Demo Request</h2>
+            <p><strong>Name:</strong> ${name}</p>
+            <p><strong>Email:</strong> ${email}</p>
+            <p><strong>Company:</strong> ${company || "N/A"}</p>
+            <p><strong>Date:</strong> ${date}</p>
+            <p><strong>Time:</strong> ${time}</p>
+          `,
+            )
+            .catch(() => {});
+        }
+      }
+    } catch (_) {
+      /* non-fatal */
+    }
+
+    res.json({
+      success: true,
+      message: "Demo request received. We will contact you shortly.",
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});

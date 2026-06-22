@@ -23,6 +23,7 @@
   },
   "dependencies": {
     "@prisma/client": "^5.0.0",
+    "apple-signin-auth": "^1.7.5",
     "aws-sdk": "^2.1440.0",
     "axios": "^1.4.0",
     "bcrypt": "^5.1.1",

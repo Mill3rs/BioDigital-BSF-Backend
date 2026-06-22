@@ -1,0 +1,8 @@
+allowBuilds:
+  '@prisma/client': false
+  '@prisma/engines': false
+  aws-sdk: false
+  bcrypt: false
+  msgpackr-extract: false
+  prisma: false
+  sharp: false

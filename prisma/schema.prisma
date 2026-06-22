@@ -13,6 +13,7 @@ model User {
   email          String?        @unique
   password       String?
   googleId       String?        @unique
+  appleId        String?        @unique
   fullName       String
   phoneNumber    String?
   profileImage   String?
