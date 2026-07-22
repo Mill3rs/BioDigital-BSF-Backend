@@ -142,12 +142,16 @@ class AuthController {
   // Login user
   async login(req, res, next) {
     try {
-      const { identifier, password } = req.body;
+      const { identifier, email, password } = req.body;
+      const loginIdentifier = identifier || email;
+      if (!loginIdentifier) {
+        throw new AppError("Email or identifier is required", 400);
+      }
 
-      const isEmail = identifier.includes("@");
+      const isEmail = loginIdentifier.includes("@");
 
       const user = await prisma.user.findFirst({
-        where: isEmail ? { email: identifier } : { phoneNumber: identifier },
+        where: isEmail ? { email: loginIdentifier } : { phoneNumber: loginIdentifier },
         include: {
           farm: true,
           driverProfile: true,
