@@ -21,28 +21,28 @@ Run scripts **in order**. Each script is idempotent within a clean environment.
 
 ```bash
 # 1. Create database, extensions, and all ENUM types
-PGPASSWORD=postgres psql -U postgres -f scripts/sql/01_create_database.sql
+PGPASSWORD=admin123@ psql -U postgres -f scripts/sql/01_create_database.sql
 
 # 2. Create all application tables (clean slate)
-PGPASSWORD=postgres psql -U postgres -d biodigital -f scripts/sql/02_create_tables.sql
+PGPASSWORD=admin123@ psql -U postgres -d biodigital -f scripts/sql/02_create_tables.sql
 
 # 3. Insert default seed data (system settings, roles, etc.)
-PGPASSWORD=postgres psql -U postgres -d biodigital -f scripts/sql/03_insert_default_data.sql
+PGPASSWORD=admin123@ psql -U postgres -d biodigital -f scripts/sql/03_insert_default_data.sql
 
 # 4. Rename original tables to x_ prefix (migration step)
-PGPASSWORD=postgres psql -U postgres -d biodigital -f scripts/sql/04_rename_database_tables.sql
+PGPASSWORD=admin123@ psql -U postgres -d biodigital -f scripts/sql/04_rename_database_tables.sql
 
 # 5. Create improved table versions (adds all current columns)
-PGPASSWORD=postgres psql -U postgres -d biodigital -f scripts/sql/05_update_database_tables.sql
+PGPASSWORD=admin123@ psql -U postgres -d biodigital -f scripts/sql/05_update_database_tables.sql
 
 # 6. Copy data from x_ tables into new tables
-PGPASSWORD=postgres psql -U postgres -d biodigital -f scripts/sql/06_insert_old_data_into_updated_database_tables.sql
+PGPASSWORD=admin123@ psql -U postgres -d biodigital -f scripts/sql/06_insert_old_data_into_updated_database_tables.sql
 
 # 7. Drop the old x_ tables
-PGPASSWORD=postgres psql -U postgres -d biodigital -f scripts/sql/07_delete_old_tables.sql
+PGPASSWORD=admin123@ psql -U postgres -d biodigital -f scripts/sql/07_delete_old_tables.sql
 
 # 8. Add performance indexes and system settings
-PGPASSWORD=postgres psql -U postgres -d biodigital -f scripts/sql/08_dashboard_indexes_and_settings.sql
+PGPASSWORD=admin123@ psql -U postgres -d biodigital -f scripts/sql/08_dashboard_indexes_and_settings.sql
 
 # 9. Generate Prisma client (no DB changes — reads schema only)
 cd /path/to/biodigital_bsf_backend

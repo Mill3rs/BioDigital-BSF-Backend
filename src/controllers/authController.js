@@ -816,7 +816,7 @@ class AuthController {
       // Link user to admin company and mark onboarding complete
       const updatedUser = await prisma.user.update({
         where: { id: userId },
-        data: { managedById: admin.id, onboardingStep: "COMPLETE" },
+        data: { managedById: admin.id, onboardingStep: "COMPLETE", ...(logoPath && { profileImage: logoPath }) },
         select: {
           id: true,
           email: true,
@@ -826,6 +826,7 @@ class AuthController {
           status: true,
           onboardingStep: true,
           managedById: true,
+          profileImage: true,
         },
       });
 
