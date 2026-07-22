@@ -8,21 +8,23 @@ const router = express.Router();
 // Get my notifications
 router.get('/', authenticate, async (req, res, next) => {
   try {
-    const { read, page = 1, limit = 20 } = req.query;
+    const { read, page = '1', limit = '20' } = req.query;
+    const pageNum = parseInt(page, 10) || 1;
+    const limitNum = parseInt(limit, 10) || 20;
     const where = { userId: req.user.id };
     
     if (read !== undefined) {
       where.read = read === 'true';
     }
     
-    const skip = (page - 1) * limit;
+    const skip = (pageNum - 1) * limitNum;
     
     const [notifications, total] = await Promise.all([
       prisma.notification.findMany({
         where,
         orderBy: { createdAt: 'desc' },
         skip,
-        take: parseInt(limit)
+        take: limitNum
       }),
       prisma.notification.count({ where })
     ]);
@@ -31,10 +33,10 @@ router.get('/', authenticate, async (req, res, next) => {
       success: true,
       data: notifications,
       pagination: {
-        page: parseInt(page),
-        limit: parseInt(limit),
+        page: pageNum,
+        limit: limitNum,
         total,
-        pages: Math.ceil(total / limit)
+        pages: Math.ceil(total / limitNum)
       }
     });
   } catch (error) {
