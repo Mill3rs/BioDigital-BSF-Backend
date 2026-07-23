@@ -716,6 +716,27 @@ router.post('/batches/:id/advance-stage',
     body('harvestFrass').optional({ nullable: true }).isFloat({ min: 0 }),
     body('harvestPrepupae').optional({ nullable: true }).isFloat({ min: 0 }),
     body('harvestRecycled').optional({ nullable: true }).isFloat({ min: 0 }),
+    // Stage 1: Breeding & Egg Collection
+    body('cageId').optional().isString(),
+    body('timeCollected').optional().isString(),
+    body('eggClutches').optional({ nullable: true }).isFloat({ min: 0 }),
+    body('initialWeight').optional({ nullable: true }).isFloat({ min: 0 }),
+    body('condition').optional().isString(),
+    // Stage 2: Hatching & Nursery
+    body('startDate').optional().isString(),
+    body('temperature').optional({ nullable: true }).isFloat({ min: -50, max: 80 }),
+    body('humidity').optional({ nullable: true }).isFloat({ min: 0, max: 100 }),
+    body('weightOfHatchedEggs').optional({ nullable: true }).isFloat({ min: 0 }),
+    body('hatchRate').optional({ nullable: true }).isFloat({ min: 0, max: 100 }),
+    // Stage 3: Larvae Rearing (Larviculture)
+    body('trayId').optional().isString(),
+    body('feedAdded').optional({ nullable: true }).isFloat({ min: 0 }),
+    body('larvaeCondition').optional().isString(),
+    // Stage 4: Harvesting & Separation
+    body('larvaeHarvested').optional({ nullable: true }).isFloat({ min: 0 }),
+    body('frassCollected').optional({ nullable: true }).isFloat({ min: 0 }),
+    body('residue').optional({ nullable: true }).isFloat({ min: 0 }),
+    body('qualityGrade').optional().isString(),
   ],
   async (req, res, next) => {
     const errors = validationResult(req);
@@ -724,7 +745,17 @@ router.post('/batches/:id/advance-stage',
     }
     try {
       const { id } = req.params;
-      const { notes, stageWeight, harvestBsfLarvae, harvestFrass, harvestPrepupae, harvestRecycled } = req.body;
+      const {
+        notes, stageWeight, harvestBsfLarvae, harvestFrass, harvestPrepupae, harvestRecycled,
+        // Stage 1
+        cageId, timeCollected, eggClutches, initialWeight, condition,
+        // Stage 2
+        startDate, temperature, humidity, weightOfHatchedEggs, hatchRate,
+        // Stage 3
+        trayId, feedAdded, larvaeCondition,
+        // Stage 4
+        larvaeHarvested, frassCollected, residue, qualityGrade,
+      } = req.body;
 
       const batch = await assertBatchIsActive(id);
 
@@ -751,24 +782,66 @@ router.post('/batches/:id/advance-stage',
         (s, v) => s + (toF(v) ?? 0), 0
       );
 
+      // Build metadata based on which stage we're advancing to
+      const stageMeta = {
+        type:              'STAGE_TRANSITION',
+        stageNumber:       nextNum,
+        stageName:         nextStage.name,
+        stageWeight:       toF(stageWeight),
+        harvestBsfLarvae:  toF(harvestBsfLarvae),
+        harvestFrass:      toF(harvestFrass),
+        harvestPrepupae:   toF(harvestPrepupae),
+        harvestRecycled:   toF(harvestRecycled),
+        harvestTotalKg:    harvestTotal > 0 ? harvestTotal : null,
+        notes:             notes || null,
+      };
+
+      // Stage-specific metadata
+      if (nextNum === 1) {
+        stageMeta.cageId = cageId || null;
+        stageMeta.timeCollected = timeCollected || null;
+        stageMeta.eggClutches = toF(eggClutches);
+        stageMeta.initialWeight = toF(initialWeight);
+        stageMeta.condition = condition || null;
+      }
+
+      if (nextNum === 2) {
+        // Auto-populate cageId from stage 1 metadata
+        const stage1Log = stageLogs.find(l => l.metadata && l.metadata.stageNumber === 1);
+        const prevCageId = stage1Log?.metadata?.cageId || cageId;
+        stageMeta.cageId = prevCageId || null;
+        stageMeta.startDate = startDate || null;
+        stageMeta.temperature = toF(temperature);
+        stageMeta.humidity = toF(humidity);
+        stageMeta.weightOfHatchedEggs = toF(weightOfHatchedEggs);
+        stageMeta.hatchRate = toF(hatchRate);
+      }
+
+      if (nextNum === 3) {
+        stageMeta.batchNumber = batch.batchNumber;
+        stageMeta.trayId = trayId || null;
+        stageMeta.feedAdded = toF(feedAdded);
+        stageMeta.temperature = toF(temperature);
+        stageMeta.humidity = toF(humidity);
+        stageMeta.larvaeCondition = larvaeCondition || null;
+      }
+
+      if (nextNum === 4) {
+        stageMeta.batchNumber = batch.batchNumber;
+        stageMeta.trayId = trayId || null;
+        stageMeta.larvaeHarvested = toF(larvaeHarvested);
+        stageMeta.frassCollected = toF(frassCollected);
+        stageMeta.residue = toF(residue);
+        stageMeta.qualityGrade = qualityGrade || null;
+      }
+
       await prisma.activityLog.create({
         data: {
           batchId:        id,
           action:         'NOTE_ADDED',
           description:    `Advanced to Stage ${nextNum}: ${nextStage.name}`,
           performedById:  req.user.id,
-          metadata: {
-            type:              'STAGE_TRANSITION',
-            stageNumber:       nextNum,
-            stageName:         nextStage.name,
-            stageWeight:       toF(stageWeight),
-            harvestBsfLarvae:  toF(harvestBsfLarvae),
-            harvestFrass:      toF(harvestFrass),
-            harvestPrepupae:   toF(harvestPrepupae),
-            harvestRecycled:   toF(harvestRecycled),
-            harvestTotalKg:    harvestTotal > 0 ? harvestTotal : null,
-            notes:             notes || null,
-          },
+          metadata: stageMeta,
         },
       });
 
