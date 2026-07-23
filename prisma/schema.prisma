@@ -60,6 +60,7 @@ model User {
   supportTickets    SupportTicket[]
   payoutRequests    PayoutRequest[]   @relation("SupplierPayouts")
   processedPayouts  PayoutRequest[]   @relation("ProcessedPayouts")
+  cages             Cage[]
 
   @@map("Users")
 }
@@ -435,6 +436,24 @@ model ProcessingBatch {
   teamAssignments TeamAssignment[]
   activityLogs    ActivityLog[]
   qualityChecks   QualityCheck[]
+  cages           Cage[]
+}
+
+// Cage Management (for Breeding & Egg Collection)
+model Cage {
+  id            String   @id @default(cuid())
+  cageId        String   // User-friendly identifier, e.g. "Cage-A1"
+  description   String?
+  location      String?
+  capacity      Float?   // Maximum capacity in kg
+  status        String   @default("ACTIVE")
+  notes         String?
+  createdById   String
+  createdBy     User     @relation(fields: [createdById], references: [id])
+  batchId       String?
+  batch         ProcessingBatch? @relation(fields: [batchId], references: [id])
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
 }
 
 enum ProcessType {

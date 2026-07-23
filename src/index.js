@@ -29,6 +29,7 @@ const notificationRoutes = require('./routes/notifications');
 const adminRoutes = require('./routes/admin');
 const postProcessingRoutes = require('./routes/post-processing');
 const supportRoutes = require('./routes/support');
+const cageRoutes = require('./routes/cages');
 const payoutRoutes = require('./routes/payout');
 
 const app = express();
@@ -121,6 +122,7 @@ app.use('/api/notifications', notificationRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/post-processing', postProcessingRoutes);
 app.use('/api/support', supportRoutes);
+app.use('/api/cages', cageRoutes);
 app.use('/api/payout', payoutRoutes);
 
 // WebSocket handlers
