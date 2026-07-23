@@ -12,6 +12,7 @@ dotenv.config();
 // Import middleware
 const { errorHandler } = require('./middleware/errorHandler');
 const logger = require('./utils/logger');
+const { ensureCageTable } = require('./startup');
 
 // Import routes
 const authRoutes = require('./routes/auth');
@@ -141,10 +142,12 @@ app.use((req, res) => {
 app.use(errorHandler);
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
+server.listen(PORT, async () => {
   logger.info(`🚀 Server running on port ${PORT}`);
   logger.info(`📝 Environment: ${process.env.NODE_ENV}`);
   logger.info(`🔗 API URL: http://localhost:${PORT}/api`);
+  // Ensure required tables exist
+  await ensureCageTable();
 });
 
 server.on('error', (err) => {
