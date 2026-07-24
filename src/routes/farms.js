@@ -95,6 +95,86 @@ router.get('/supplier-orgs', authenticate, authorize('SUPER_ADMIN', 'ADMIN', 'MA
   }
 });
 
+// Create a supplier record (for admin/manager adding on behalf of offline suppliers)
+router.post('/create-supplier',
+  authenticate,
+  authorize('SUPER_ADMIN', 'ADMIN', 'MANAGER'),
+  [
+    body('fullName').notEmpty().withMessage('Full name is required'),
+    body('supplierType').optional().isIn(['FARMER', 'COMPANY', 'DUMP_SITE', 'RESTAURANT', 'CHOP_BAR', 'SHOPPING_MALL', 'OTHER']),
+    body('organizationName').optional().isString(),
+    body('farmName').optional().isString(),
+    body('phoneNumber').optional().isString(),
+    body('email').optional().isEmail(),
+    body('location').optional().isString(),
+    body('city').optional().isString(),
+    body('region').optional().isString(),
+    body('country').optional().isString(),
+  ],
+  async (req, res, next) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ success: false, errors: errors.array() });
+    }
+    try {
+      const { fullName, supplierType, organizationName, farmName, phoneNumber, email, location, city, region, country } = req.body;
+
+      // Generate a placeholder email if none provided
+      const userEmail = email || `supplier_${Date.now()}@placeholder.biodigitalbsf.com`;
+      const defaultPassword = 'Supplier123!';
+
+      const existing = await prisma.user.findUnique({ where: { email: userEmail } });
+      if (existing) throw new AppError('A user with this email already exists', 409);
+
+      const bcrypt = require('bcryptjs');
+      const hashedPassword = await bcrypt.hash(defaultPassword, 10);
+
+      const user = await prisma.user.create({
+        data: {
+          email: userEmail,
+          password: hashedPassword,
+          fullName,
+          phoneNumber: phoneNumber || null,
+          role: 'SUPPLIER',
+          status: 'ACTIVE',
+          onboardingStep: 'COMPLETE',
+          supplierProfile: {
+            create: {
+              supplierType: supplierType || 'FARMER',
+              organizationName: organizationName || null,
+              farmName: farmName || null,
+              collectionAddress: location ? {
+                address: location,
+                city: city || null,
+                region: region || null,
+                country: country || null,
+              } : null,
+            },
+          },
+        },
+        include: {
+          supplierProfile: true,
+        },
+      });
+
+      res.status(201).json({
+        success: true,
+        message: 'Supplier created successfully',
+        data: {
+          id: user.id,
+          fullName: user.fullName,
+          email: user.email,
+          phoneNumber: user.phoneNumber,
+          role: user.role,
+          supplierProfile: user.supplierProfile,
+        },
+      });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
 // Get all farms
 router.get('/', authenticate, async (req, res, next) => {
   try {
