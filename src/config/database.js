@@ -10,22 +10,29 @@ const dbConfig = {
   connectionTimeoutMillis: config.DATABASE_CONNECTION_TIMEOUT
 };
 
-// Detect original DB URL and swap to IPv4-compatible Supabase pooler if needed
-const resolveDatabaseUrl = (originalUrl) => {
+// Resolve Supabase connection: extract project ref and use IPv4 pooler
+const buildPoolerUrl = (originalUrl) => {
   if (!originalUrl) return originalUrl;
-  // If the host is an IPv6-only Supabase database, switch to the IPv4 pooler
-  if (originalUrl.includes('supabase.co') && !originalUrl.includes('pooler.supabase.com')) {
-    const poolerUrl = originalUrl
-      .replace(/(@)[^:]+(:\d+)?\//, '$1aws-0-eu-west-1.pooler.supabase.com:6543/')
-      .replace(/:5432\//, ':6543/');
-    const separator = poolerUrl.includes('?') ? '&' : '?';
-    return poolerUrl + separator + 'pgbouncer=true';
+  // Only transform Supabase direct connections (not already pooler connections)
+  if (!originalUrl.includes('supabase.co') || originalUrl.includes('pooler.supabase.com')) {
+    return originalUrl;
   }
-  return originalUrl;
+  // Extract project ref from hostname: db.{PROJECT_REF}.supabase.co
+  const match = originalUrl.match(/@db\.([^./]+)\.supabase\.co/);
+  const projectRef = match ? match[1] : null;
+  if (!projectRef) return originalUrl;
+  
+  // Build pooler URL with user.postgres.{project_ref} format
+  const poolerUrl = originalUrl
+    .replace(/@db\.[^/]+/, '@aws-0-eu-west-1.pooler.supabase.com')
+    .replace(/:5432\//, ':6543/')
+    .replace(/postgresql:\/\/postgres:/, `postgresql://postgres.${projectRef}:`);
+  const separator = poolerUrl.includes('?') ? '&' : '?';
+  return poolerUrl + separator + 'pgbouncer=true';
 };
 
 // Use pooler URL if on Supabase to support IPv4-only hosts
-const effectiveUrl = resolveDatabaseUrl(dbConfig.url);
+const effectiveUrl = buildPoolerUrl(dbConfig.url);
 if (effectiveUrl !== dbConfig.url) {
   logger.info('Using Supabase connection pooler for IPv4 compatibility');
   dbConfig.url = effectiveUrl;
