@@ -24,8 +24,8 @@ const buildPoolerUrl = (originalUrl) => {
   
   // Build pooler URL with user.postgres.{project_ref} format
   const poolerUrl = originalUrl
-    .replace(/@db\.[^/]+/, '@aws-0-eu-west-1.pooler.supabase.com')
-    .replace(/:5432\//, ':6543/')
+    .replace(/@db\.([^./]+)\.supabase\.co/, '@aws-0-eu-west-1.pooler.supabase.com')
+    .replace(':5432/', ':6543/')
     .replace(/postgresql:\/\/postgres:/, `postgresql://postgres.${projectRef}:`);
   const separator = poolerUrl.includes('?') ? '&' : '?';
   return poolerUrl + separator + 'pgbouncer=true';
