@@ -380,6 +380,15 @@ router.post('/batches/:id/add-waste', authenticate, authorize('MANAGER', 'ADMIN'
       select: { id: true, sourceName: true, quantity: true, unit: true, processedQuantity: true }
     });
 
+    // Check for waste records already linked to another batch
+    const alreadyBatched = wasteRecords.filter(r => r.processedQuantity && r.processedQuantity > 0 && r.processingBatchId && r.processingBatchId !== id);
+    if (alreadyBatched.length > 0) {
+      return res.status(409).json({
+        success: false,
+        message: `The following waste records are already linked to another batch: ${alreadyBatched.map(r => `"${r.sourceName}"`).join(', ')}. Each waste record can only be assigned to one batch.`
+      });
+    }
+
     // Validate: batch quantity must not exceed the remaining quantity of any waste record
     const overLimitErrors = wasteRecords
       .map((record) => {

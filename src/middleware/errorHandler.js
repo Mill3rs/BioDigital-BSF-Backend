@@ -27,12 +27,13 @@ const errorHandler = (err, req, res, next) => {
     statusCode
   });
   
-  // Prisma specific errors
+  // Prisma unique constraint violation
   if (err.code === 'P2002') {
+    const fields = err.meta?.target ? err.meta.target.join(', ') : 'unknown field';
     return res.status(409).json({
       success: false,
-      message: `Duplicate field value: ${err.meta?.target?.join(', ')}`,
-      error: 'Unique constraint violation'
+      message: `A record with this ${fields} already exists. Duplicates are not allowed.`,
+      error: 'Duplicate entry'
     });
   }
   

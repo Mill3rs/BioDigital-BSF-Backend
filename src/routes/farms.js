@@ -292,6 +292,19 @@ router.post('/', authenticate, authorize('SUPER_ADMIN', 'ADMIN', 'MANAGER'), [
       locationData = typeof location === 'string' ? { address: location } : location;
     }
 
+    // Check for duplicate farm name under the same admin
+    const adminId = req.user.role === 'ADMIN' ? req.user.adminManaged?.id : null;
+    const duplicateFarm = await prisma.farm.findFirst({
+      where: {
+        name,
+        adminId: adminId || undefined,
+        deletedAt: null,
+      },
+    });
+    if (duplicateFarm) {
+      throw new AppError(`A farm named "${name}" already exists under this account`, 409);
+    }
+
     const farm = await prisma.farm.create({
       data: {
         name,
@@ -304,11 +317,10 @@ router.post('/', authenticate, authorize('SUPER_ADMIN', 'ADMIN', 'MANAGER'), [
         city,
         postalCode,
         location: locationData,
-        adminId: req.user.role === 'ADMIN' ? req.user.adminManaged?.id : null,
+        adminId,
         // Auto-assign the creating manager as the farm manager
         managerId: req.user.role === 'MANAGER' ? req.user.id : undefined,
         status: 'ACTIVE',
-        // contactName / contactEmail / contactPhone are not schema fields; stored in description or ignored
       },
       include: {
         manager: true

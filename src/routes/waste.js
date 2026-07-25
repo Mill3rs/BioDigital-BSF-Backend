@@ -190,6 +190,28 @@ router.post('/', authenticate, async (req, res, next) => {
       finalFarmId = req.user.farmId;
     }
 
+    // Check for duplicate waste record (same source + supplier + date)
+    const recordDate = new Date(date);
+    const dayStart = new Date(recordDate);
+    dayStart.setHours(0, 0, 0, 0);
+    const dayEnd = new Date(recordDate);
+    dayEnd.setHours(23, 59, 59, 999);
+    
+    const duplicateWaste = await prisma.wasteRecord.findFirst({
+      where: {
+        sourceName,
+        supplierId: supplierId || (req.user.role === 'SUPPLIER' ? req.user.id : null) || undefined,
+        date: { gte: dayStart, lte: dayEnd },
+        deletedAt: null,
+      },
+    });
+    if (duplicateWaste) {
+      throw new AppError(
+        `A waste record from "${sourceName}" on ${recordDate.toLocaleDateString()} already exists`,
+        409,
+      );
+    }
+
     const carbonSaved = await carbonService.calculateCarbonSavings(
       parseFloat(quantity),
       sourceType
@@ -201,7 +223,7 @@ router.post('/', authenticate, async (req, res, next) => {
         sourceType,
         quantity: parseFloat(quantity),
         unit,
-        date: new Date(date),
+        date: recordDate,
         status: 'PENDING',
         description,
         location,
