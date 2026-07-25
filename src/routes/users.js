@@ -120,8 +120,9 @@ router.get('/', authenticate, authorize('SUPER_ADMIN', 'ADMIN'), async (req, res
     if (role) where.role = role;
     if (status) where.status = status;
     
-    if (req.user.role === 'ADMIN') {
-      where.managedById = req.user.id;
+    // Admin scope: ADMIN and MANAGER see users in their company
+    if (req.user.adminId) {
+      where.managedById = req.user.adminId;
     }
     
     if (search) {

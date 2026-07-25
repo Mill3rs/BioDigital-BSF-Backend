@@ -73,7 +73,11 @@ router.get('/', authenticate, async (req, res, next) => {
       if (endDate) where.date.lte = new Date(endDate);
     }
     
-    if (req.user.role === 'MANAGER' && req.user.farmId) {
+    // Admin scope: users only see waste belonging to their company
+    if (req.user.adminId) {
+      // WasteRecord is linked to Farm, Farm is linked to Admin
+      where.farm = { adminId: req.user.adminId };
+    } else if (req.user.role === 'MANAGER' && req.user.farmId) {
       where.farmId = req.user.farmId;
     } else if (req.user.role === 'SUPPLIER') {
       where.supplierId = req.user.id;

@@ -2,6 +2,28 @@ const jwt = require('jsonwebtoken');
 const { prisma } = require('../config/database');
 const logger = require('../utils/logger');
 
+/**
+ * Resolve the admin (company) ID a user belongs to.
+ * SUPER_ADMIN → null (no restriction, sees all)
+ * ADMIN       → their own Admin record id
+ * MANAGER/etc → their managedById
+ */
+function resolveAdminId(user) {
+  if (user.role === 'SUPER_ADMIN') return null;
+  if (user.role === 'ADMIN') return user.adminManaged?.id || null;
+  return user.managedById || null;
+}
+
+/**
+ * Build an admin-scoped Prisma where filter.
+ * Pass the relation field path to scope results to a company.
+ */
+function adminScope(adminId, field = 'adminId', through = null) {
+  if (!adminId) return {};
+  if (through) return { [through]: { [field]: adminId } };
+  return { [field]: adminId };
+}
+
 // JWT Authentication Middleware
 const authenticate = async (req, res, next) => {
   try {
@@ -48,6 +70,8 @@ const authenticate = async (req, res, next) => {
       });
     }
     
+    const adminId = resolveAdminId(user);
+    
     req.user = {
       id: user.id,
       email: user.email,
@@ -57,9 +81,25 @@ const authenticate = async (req, res, next) => {
       farmId: user.farm?.id,
       farm: user.farm,
       adminManaged: user.adminManaged,
+      managedById: user.managedById,
+      adminId, // the resolved company ID
       driverProfile: user.driverProfile,
       buyerProfile: user.buyerProfile,
       supplierProfile: user.supplierProfile
+    };
+    
+    // Attach helper for admin-scoped filtering in route handlers
+    req.adminScope = {
+      adminId,
+      /** Generate a Prisma where clause scoped to this admin's company */
+      where(field = 'adminId', through = null) {
+        return adminScope(adminId, field, through);
+      },
+      /** Check if a resource belongs to this admin's company */
+      owns(ownerId) {
+        if (!adminId) return true;
+        return ownerId === adminId;
+      },
     };
     
     next();

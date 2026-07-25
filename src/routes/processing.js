@@ -130,7 +130,10 @@ router.get('/batches', authenticate, async (req, res, next) => {
       where.batchNumber = { startsWith: 'LC-' };
     }
     
-    if (req.user.role === 'MANAGER' && req.user.farmId) {
+    // Admin scope: users only see batches belonging to their company
+    if (req.user.adminId) {
+      where.farm = { adminId: req.user.adminId };
+    } else if (req.user.role === 'MANAGER' && req.user.farmId) {
       where.farmId = req.user.farmId;
     }
     

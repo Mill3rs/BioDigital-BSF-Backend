@@ -79,8 +79,8 @@ router.get('/top-suppliers', authenticate, authorize('SUPER_ADMIN', 'ADMIN', 'MA
 router.get('/supplier-orgs', authenticate, authorize('SUPER_ADMIN', 'ADMIN', 'MANAGER'), async (req, res, next) => {
   try {
     const where = {};
-    if (req.user.role === 'ADMIN') {
-      where.adminId = req.user.adminManaged?.id;
+    if (req.user.adminId) {
+      where.adminId = req.user.adminId;
     }
     const profiles = await prisma.supplierProfile.findMany({
       where,

@@ -17,6 +17,11 @@ router.get('/', authenticate, async (req, res, next) => {
     
     if (status) where.status = status;
     
+    // Admin scope: users only see cages created within their company
+    if (req.user.adminId) {
+      where.createdBy = { managedById: req.user.adminId };
+    }
+    
     const skip = (page - 1) * limit;
     
     const [cages, total] = await Promise.all([
