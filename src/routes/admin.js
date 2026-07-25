@@ -469,8 +469,8 @@ router.put('/admins/:adminId/subscription', authenticate, authorize('SUPER_ADMIN
   }
 });
 
-// Get audit logs (aggregated activity across the system) — Super Admin only
-router.get('/audit-logs', authenticate, authorize('SUPER_ADMIN'), async (req, res, next) => {
+// Get audit logs (aggregated activity across the system) — Super Admin & Admin
+router.get('/audit-logs', authenticate, authorize('SUPER_ADMIN', 'ADMIN'), async (req, res, next) => {
   try {
     const limit = Math.min(parseInt(req.query.limit ?? '100'), 200);
 
