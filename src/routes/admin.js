@@ -474,7 +474,7 @@ router.get('/audit-logs', authenticate, authorize('SUPER_ADMIN', 'ADMIN'), async
   try {
     const limit = Math.min(parseInt(req.query.limit ?? '100'), 200);
 
-    const [wasteEvents, userEvents, batchEvents] = await Promise.all([
+    const [wasteEvents, userEvents, batchEvents, cageEvents] = await Promise.all([
       prisma.wasteRecord.findMany({
         take: limit,
         orderBy: { createdAt: 'desc' },
@@ -507,6 +507,17 @@ router.get('/audit-logs', authenticate, authorize('SUPER_ADMIN', 'ADMIN'), async
           createdBy: { select: { fullName: true, email: true } },
         },
       }),
+      prisma.cage.findMany({
+        take: limit,
+        orderBy: { createdAt: 'desc' },
+        select: {
+          id: true,
+          cageId: true,
+          status: true,
+          createdAt: true,
+          createdBy: { select: { fullName: true, email: true } },
+        },
+      }),
     ]);
 
     const entries = [
@@ -533,6 +544,14 @@ router.get('/audit-logs', authenticate, authorize('SUPER_ADMIN', 'ADMIN'), async
         actor: b.createdBy?.fullName ?? b.createdBy?.email ?? 'System',
         detail: `Batch #${b.batchNumber}${b.name ? ` — ${b.name}` : ''} (${b.status})`,
         timestamp: b.createdAt,
+      })),
+      ...cageEvents.map((c) => ({
+        id: `cage-${c.id}`,
+        type: 'CAGE',
+        action: c.status === 'ACTIVE' ? 'Cage Created' : 'Cage Updated',
+        actor: c.createdBy?.fullName ?? c.createdBy?.email ?? 'System',
+        detail: `Cage: ${c.cageId} (${c.status})`,
+        timestamp: c.createdAt,
       })),
     ]
       .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))

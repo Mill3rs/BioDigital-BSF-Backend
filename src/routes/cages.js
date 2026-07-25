@@ -168,7 +168,7 @@ router.put(
 router.delete(
   '/:id',
   authenticate,
-  authorize('SUPER_ADMIN', 'ADMIN'),
+  authorize('SUPER_ADMIN', 'ADMIN', 'MANAGER'),
   async (req, res, next) => {
     try {
       const existing = await prisma.cage.findUnique({ where: { id: req.params.id } });
