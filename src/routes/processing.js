@@ -120,7 +120,7 @@ router.get('/batches', authenticate, async (req, res, next) => {
     if (farmId) where.farmId = farmId;
     if (status) {
       // Support comma-separated status values (e.g. 'PENDING,ACTIVE')
-      const statuses = status.split(',').map((s: string) => s.trim()).filter(Boolean);
+      const statuses = status.split(',').map(s => s.trim()).filter(Boolean);
       where.status = statuses.length === 1 ? statuses[0] : { in: statuses };
     }
     // Filter by batch type using batch number prefix
