@@ -118,7 +118,11 @@ router.get('/batches', authenticate, async (req, res, next) => {
     const where = {};
     
     if (farmId) where.farmId = farmId;
-    if (status) where.status = status;
+    if (status) {
+      // Support comma-separated status values (e.g. 'PENDING,ACTIVE')
+      const statuses = status.split(',').map((s: string) => s.trim()).filter(Boolean);
+      where.status = statuses.length === 1 ? statuses[0] : { in: statuses };
+    }
     // Filter by batch type using batch number prefix
     if (batchType === 'WASTE') {
       where.batchNumber = { startsWith: 'WB-' };
