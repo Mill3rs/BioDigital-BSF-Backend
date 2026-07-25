@@ -114,11 +114,17 @@ function computeStageInfo(batch, stageLogs) {
 // Get all processing batches
 router.get('/batches', authenticate, async (req, res, next) => {
   try {
-    const { farmId, status, page = 1, limit = 20 } = req.query;
+    const { farmId, status, page = 1, limit = 20, batchType } = req.query;
     const where = {};
     
     if (farmId) where.farmId = farmId;
     if (status) where.status = status;
+    // Filter by batch type using batch number prefix
+    if (batchType === 'WASTE') {
+      where.batchNumber = { startsWith: 'WB-' };
+    } else if (batchType === 'LIFECYCLE') {
+      where.batchNumber = { startsWith: 'LC-' };
+    }
     
     if (req.user.role === 'MANAGER' && req.user.farmId) {
       where.farmId = req.user.farmId;
