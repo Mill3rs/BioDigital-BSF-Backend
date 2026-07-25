@@ -57,7 +57,7 @@ async function notifyAdminsAndManagers(wasteRecord) {
 // Get waste records (with pagination, filtering, role scoping)
 router.get('/', authenticate, async (req, res, next) => {
   try {
-    const { farmId, status, sourceType, startDate, endDate, page: rawPage = '1', limit: rawLimit = '20' } = req.query;
+    const { farmId, status, sourceType, startDate, endDate, noSupplier, page: rawPage = '1', limit: rawLimit = '20' } = req.query;
     const page = parseInt(rawPage, 10) || 1;
     const limit = parseInt(rawLimit, 10) || 20;
     const where = {};
@@ -65,6 +65,7 @@ router.get('/', authenticate, async (req, res, next) => {
     if (farmId) where.farmId = farmId;
     if (status) where.status = status;
     if (sourceType) where.sourceType = sourceType;
+    if (noSupplier === 'true') where.supplierId = null;
     
     if (startDate || endDate) {
       where.date = {};
