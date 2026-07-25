@@ -224,10 +224,18 @@ router.put('/:id', authenticate, authorize('SUPER_ADMIN', 'ADMIN'), async (req, 
   }
 });
 
-// Delete user (Super Admin only)
-router.delete('/:id', authenticate, authorize('SUPER_ADMIN'), async (req, res, next) => {
+// Delete user (Super Admin or Admin)
+router.delete('/:id', authenticate, authorize('SUPER_ADMIN', 'ADMIN'), async (req, res, next) => {
   try {
     const { id } = req.params;
+    
+    // Admin can only delete users they manage (suppliers)
+    if (req.user.role === 'ADMIN') {
+      const user = await prisma.user.findUnique({ where: { id }, select: { managedById: true, role: true } });
+      if (!user || user.managedById !== req.user.id || user.role !== 'SUPPLIER') {
+        throw new AppError('You can only delete suppliers you manage', 403);
+      }
+    }
     
     await prisma.user.delete({ where: { id } });
     res.json({ success: true, message: 'User deleted successfully' });

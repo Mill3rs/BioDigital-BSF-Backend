@@ -705,6 +705,59 @@ router.get('/batches/:id/stage', authenticate, async (req, res, next) => {
   }
 });
 
+// Get Larvae Batch info for a processing batch
+router.get('/batches/:id/larvae-batch', authenticate, async (req, res, next) => {
+  try {
+    const { id } = req.params;
+
+    const batch = await prisma.processingBatch.findUnique({
+      where: { id },
+      select: { id: true, batchNumber: true, quantity: true, status: true },
+    });
+    if (!batch) {
+      return res.status(404).json({ success: false, message: 'Batch not found' });
+    }
+
+    // Find the larvae batch creation log
+    const larvaeLogs = await prisma.activityLog.findMany({
+      where: {
+        batchId: id,
+        action: 'NOTE_ADDED',
+        metadata: {
+          path: ['type'],
+          in: ['LARVAE_BATCH_CREATED', 'LARVAE_BATCH_HARVESTED'],
+        },
+      },
+      orderBy: { timestamp: 'asc' },
+    });
+
+    const creationLog = larvaeLogs.find(l => l.metadata?.type === 'LARVAE_BATCH_CREATED');
+    const harvestLog = larvaeLogs.find(l => l.metadata?.type === 'LARVAE_BATCH_HARVESTED');
+
+    res.json({
+      success: true,
+      data: {
+        batchId: batch.id,
+        batchNumber: batch.batchNumber,
+        exists: !!creationLog,
+        initialWeight: creationLog?.metadata?.initialWeight ?? null,
+        hatchedEggsWeight: creationLog?.metadata?.hatchedEggsWeight ?? null,
+        weightOfHatchedEggs: creationLog?.metadata?.weightOfHatchedEggs ?? null,
+        hatchRate: creationLog?.metadata?.hatchRate ?? null,
+        createdAt: creationLog?.timestamp ?? null,
+        harvested: !!harvestLog,
+        larvaeHarvested: harvestLog?.metadata?.larvaeHarvested ?? null,
+        frassCollected: harvestLog?.metadata?.frassCollected ?? null,
+        residue: harvestLog?.metadata?.residue ?? null,
+        qualityGrade: harvestLog?.metadata?.qualityGrade ?? null,
+        harvestedAt: harvestLog?.timestamp ?? null,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // Advance BSF batch to the next stage
 router.post('/batches/:id/advance-stage',
   authenticate,
@@ -824,6 +877,34 @@ router.post('/batches/:id/advance-stage',
         stageMeta.temperature = toF(temperature);
         stageMeta.humidity = toF(humidity);
         stageMeta.larvaeCondition = larvaeCondition || null;
+
+        // ── Auto-create Larvae Batch ─────────────────────────────────
+        // When advancing from Stage 2 (Hatching & Nursery) to Stage 3
+        // (Larvae Rearing), create a dedicated larvae batch record that
+        // tracks the hatched eggs as they enter the rearing phase.
+        const stage2Log = stageLogs.find(l => l.metadata && l.metadata.stageNumber === 2);
+        const hatchedEggsWeight = stage2Log?.metadata?.weightOfHatchedEggs
+          ? parseFloat(stage2Log.metadata.weightOfHatchedEggs)
+          : toF(weightOfHatchedEggs);
+        const larvaeQty = hatchedEggsWeight || batch.quantity * 0.15; // ~15% of input if no hatch weight
+
+        await prisma.activityLog.create({
+          data: {
+            batchId:        id,
+            action:         'NOTE_ADDED',
+            description:    `Larvae batch created from Hatched Eggs (${larvaeQty.toFixed(2)} kg)`,
+            performedById:  req.user.id,
+            metadata: {
+              type:              'LARVAE_BATCH_CREATED',
+              batchNumber:       batch.batchNumber,
+              initialWeight:     larvaeQty,
+              hatchedEggsWeight: hatchedEggsWeight,
+              weightOfHatchedEggs: toF(weightOfHatchedEggs),
+              hatchRate:         toF(hatchRate),
+              stageTransitioned: true,
+            },
+          },
+        });
       }
 
       if (nextNum === 4) {
@@ -833,6 +914,26 @@ router.post('/batches/:id/advance-stage',
         stageMeta.frassCollected = toF(frassCollected);
         stageMeta.residue = toF(residue);
         stageMeta.qualityGrade = qualityGrade || null;
+
+        // ── Update Larvae Batch with harvest data ─────────────────────
+        if (toF(larvaeHarvested) || toF(frassCollected)) {
+          await prisma.activityLog.create({
+            data: {
+              batchId:        id,
+              action:         'NOTE_ADDED',
+              description:    `Larvae batch harvest recorded: ${toF(larvaeHarvested) || 0} kg larvae, ${toF(frassCollected) || 0} kg frass`,
+              performedById:  req.user.id,
+              metadata: {
+                type:              'LARVAE_BATCH_HARVESTED',
+                batchNumber:       batch.batchNumber,
+                larvaeHarvested:   toF(larvaeHarvested),
+                frassCollected:    toF(frassCollected),
+                residue:           toF(residue),
+                qualityGrade:      qualityGrade || null,
+              },
+            },
+          });
+        }
       }
 
       await prisma.activityLog.create({

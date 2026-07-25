@@ -175,6 +175,34 @@ router.post('/create-supplier',
   },
 );
 
+// Update supplier profile (Admin/Manager)
+router.put('/suppliers/:userId', authenticate, authorize('SUPER_ADMIN', 'ADMIN', 'MANAGER'), async (req, res, next) => {
+  try {
+    const { userId } = req.params;
+    const { supplierType, organizationName, farmName, collectionAddress } = req.body;
+
+    const profile = await prisma.supplierProfile.findUnique({ where: { userId } });
+    if (!profile) throw new AppError('Supplier profile not found', 404);
+
+    const updated = await prisma.supplierProfile.update({
+      where: { userId },
+      data: {
+        ...(supplierType !== undefined && { supplierType }),
+        ...(organizationName !== undefined && { organizationName }),
+        ...(farmName !== undefined && { farmName }),
+        ...(collectionAddress !== undefined && { collectionAddress: typeof collectionAddress === 'string' ? { address: collectionAddress } : collectionAddress }),
+      },
+      include: {
+        user: { select: { id: true, fullName: true, email: true, phoneNumber: true } },
+      },
+    });
+
+    res.json({ success: true, data: updated });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // Get all farms
 router.get('/', authenticate, async (req, res, next) => {
   try {
