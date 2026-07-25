@@ -12,10 +12,11 @@ const generateOrderNumber = () => {
 };
 
 // Generate batch number
-const generateBatchNumber = () => {
+const generateBatchNumber = (type = 'WASTE') => {
   const date = moment().format('YYYYMMDD');
   const random = Math.floor(Math.random() * 1000);
-  return `BATCH-${date}-${random}`;
+  const prefix = type === 'LIFECYCLE' ? 'LC' : 'WB';
+  return `${prefix}-${date}-${random}`;
 };
 
 // Generate invoice number
