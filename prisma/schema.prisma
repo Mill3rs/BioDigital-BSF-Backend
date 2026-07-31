@@ -30,6 +30,8 @@ model User {
   twoFactorSecret    String?
   lastActiveAt       DateTime?
   deletedAt          DateTime?
+  resetPasswordCode  String?
+  resetPasswordExpires DateTime?
   createdAt      DateTime       @default(now())
   updatedAt      DateTime       @updatedAt
 

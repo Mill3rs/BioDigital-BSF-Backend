@@ -73,25 +73,26 @@ router.get('/', authenticate, async (req, res, next) => {
       if (endDate) where.date.lte = new Date(endDate);
     }
     
-    // Admin scope: see ALL waste belonging to the admin's company —
-    // farm-linked records AND records logged by company staff
-    // (supplier orgs, other sources with no farm linkage).
-    if (req.user.adminId) {
-      where.OR = [
-        // Waste linked to a farm owned by this admin
-        { farm: { adminId: req.user.adminId } },
-        // Waste recorded by anyone in this admin's company
-        { recordedBy: { managedById: req.user.adminId } },
-      ];
+    // Role scoping — DRIVER/SUPPLIER first so they only ever see
+    // waste assigned to / submitted by them, never company-wide waste.
+    if (req.user.role === 'SUPPLIER') {
+      where.supplierId = req.user.id;
+    } else if (req.user.role === 'DRIVER') {
+      // Drivers ONLY see waste assigned to them — unassigned waste is hidden.
+      where.driverId = req.user.id;
     } else if (req.user.role === 'MANAGER' && req.user.farmId) {
       where.OR = [
         { farmId: req.user.farmId },
         { recordedBy: { managedById: req.user.adminId } },
       ];
-    } else if (req.user.role === 'SUPPLIER') {
-      where.supplierId = req.user.id;
-    } else if (req.user.role === 'DRIVER') {
-      where.driverId = req.user.id;
+    } else if (req.user.adminId) {
+      // Admin scope: see ALL waste belonging to the admin's company —
+      // farm-linked records AND records logged by company staff
+      // (supplier orgs, other sources with no farm linkage).
+      where.OR = [
+        { farm: { adminId: req.user.adminId } },
+        { recordedBy: { managedById: req.user.adminId } },
+      ];
     }
     
     const skip = (page - 1) * limit;
@@ -146,11 +147,35 @@ router.get('/', authenticate, async (req, res, next) => {
   }
 });
 
-// Get waste record by ID
+// Get waste record by ID (role-scoped)
 router.get('/:id', authenticate, async (req, res, next) => {
   try {
-    const wasteRecord = await prisma.wasteRecord.findUnique({
-      where: { id: req.params.id },
+    // Scope: non-privileged roles may only fetch their own records.
+    const scopes = [];
+    if (req.user.role === 'DRIVER') {
+      scopes.push({ driverId: req.user.id });
+    } else if (req.user.role === 'SUPPLIER') {
+      scopes.push({ supplierId: req.user.id });
+    } else if (req.user.role === 'MANAGER' && req.user.farmId) {
+      scopes.push(
+        { farmId: req.user.farmId },
+        { recordedBy: { managedById: req.user.adminId } },
+      );
+    } else if (req.user.adminId) {
+      scopes.push(
+        { farm: { adminId: req.user.adminId } },
+        { recordedBy: { managedById: req.user.adminId } },
+      );
+    }
+    // SUPER_ADMIN: no scope restriction
+
+    const wasteRecord = await prisma.wasteRecord.findFirst({
+      where: {
+        id: req.params.id,
+        ...(scopes.length > 0
+          ? { OR: scopes }
+          : {}),
+      },
       include: {
         farm: true,
         recordedBy: { select: { id: true, fullName: true, email: true, phoneNumber: true } },

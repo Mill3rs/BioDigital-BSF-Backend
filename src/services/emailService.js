@@ -105,6 +105,7 @@ class EmailService {
           .header { background-color: #FF9800; color: white; padding: 20px; text-align: center; }
           .content { padding: 20px; background-color: #f9f9f9; }
           .button { display: inline-block; padding: 12px 24px; background-color: #FF9800; color: white; text-decoration: none; border-radius: 4px; margin: 20px 0; }
+          .code-box { background-color: white; border: 2px dashed #FF9800; border-radius: 8px; padding: 16px; text-align: center; margin: 20px 0; font-size: 20px; font-weight: bold; letter-spacing: 2px; word-break: break-all; }
           .warning { color: #f44336; font-size: 14px; margin-top: 20px; }
         </style>
       </head>
@@ -116,12 +117,16 @@ class EmailService {
           <div class="content">
             <p>Hello,</p>
             <p>We received a request to reset your password for your BioDigital BSF account.</p>
+            <p><strong>Your password reset code:</strong></p>
+            <div class="code-box">${token}</div>
+            <p>Enter this code in the app to reset your password.</p>
+            <p>Or click the button below to reset via your browser:</p>
             <div style="text-align: center;">
               <a href="${resetUrl}" class="button">Reset Password</a>
             </div>
             <p>Or copy and paste this link into your browser:</p>
             <p>${resetUrl}</p>
-            <p>This link will expire in 1 hour.</p>
+            <p>This code and link will expire in 1 hour.</p>
             <div class="warning">
               <p>If you didn't request a password reset, please ignore this email or contact support.</p>
             </div>

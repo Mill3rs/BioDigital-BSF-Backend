@@ -1,4 +1,5 @@
 const bcrypt = require("bcryptjs");
+const crypto = require("crypto");
 const { prisma } = require("../config/database");
 const {
   generateToken,
@@ -565,7 +566,7 @@ class AuthController {
     }
   }
 
-  // Forgot password
+  // Forgot password — generates a short 6-digit code emailed to the user
   async forgotPassword(req, res, next) {
     try {
       const { email } = req.body;
@@ -574,25 +575,31 @@ class AuthController {
       if (!user) {
         return res.json({
           success: true,
-          message: "If email exists, reset link will be sent",
+          message: "If email exists, reset code will be sent",
         });
       }
 
-      const resetToken = generateToken(user.id, user.role);
-      const resetUrl = `${process.env.API_URL}/api/auth/reset-password/${resetToken}`;
+      // Generate a short, user-friendly 6-digit code
+      const resetCode = String(crypto.randomInt(100000, 1000000));
+      const expiresAt = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
 
-      logger.info(`Password reset link for ${email}: ${resetUrl}`);
+      await prisma.user.update({
+        where: { id: user.id },
+        data: { resetPasswordCode: resetCode, resetPasswordExpires: expiresAt },
+      });
 
-      // Send password reset email
+      logger.info(`Password reset code sent for ${email}`);
+
+      // Send password reset email with the code
       emailService
-        .sendPasswordResetEmail(email, resetToken)
+        .sendPasswordResetEmail(email, resetCode)
         .catch((err) =>
           logger.error("Failed to send password reset email:", err),
         );
 
       res.json({
         success: true,
-        message: "Password reset instructions sent to your email",
+        message: "Password reset code sent to your email",
       });
     } catch (error) {
       next(error);
@@ -674,21 +681,49 @@ class AuthController {
 </html>`);
   }
 
-  // Reset password
+  // Reset password — validates the 6-digit code from the email
   async resetPassword(req, res, next) {
     try {
       const { token } = req.params;
       const { password } = req.body;
+      const code = (token || "").trim();
 
-      const decoded = verifyToken(token);
-      if (!decoded) {
-        throw new AppError("Invalid or expired reset token", 400);
+      if (!code) {
+        throw new AppError("Reset code is required", 400);
+      }
+
+      // Find user by the short reset code (fall back to legacy JWT token)
+      let user = await prisma.user.findFirst({
+        where: { resetPasswordCode: code },
+      });
+
+      if (!user) {
+        // Legacy support: some older emails contain a JWT token
+        const decoded = verifyToken(code);
+        if (decoded && decoded.userId) {
+          user = await prisma.user.findUnique({ where: { id: decoded.userId } });
+        }
+      }
+
+      if (!user) {
+        throw new AppError("Invalid or expired reset code", 400);
+      }
+
+      // Enforce expiry for code-based resets
+      if (user.resetPasswordCode) {
+        if (!user.resetPasswordExpires || user.resetPasswordExpires < new Date()) {
+          throw new AppError("Reset code has expired. Please request a new one.", 400);
+        }
       }
 
       const hashedPassword = await bcrypt.hash(password, 10);
       await prisma.user.update({
-        where: { id: decoded.userId },
-        data: { password: hashedPassword },
+        where: { id: user.id },
+        data: {
+          password: hashedPassword,
+          resetPasswordCode: null,
+          resetPasswordExpires: null,
+        },
       });
 
       res.json({
