@@ -73,14 +73,21 @@ router.get('/', authenticate, async (req, res, next) => {
       if (endDate) where.date.lte = new Date(endDate);
     }
     
-    // Admin scope: users only see waste belonging to their company.
-    // Exempt "other source" records (no supplier) — these are standalone
-    // and have no farm linkage, so the farm filter would hide them.
-    if (req.user.adminId && noSupplier !== 'true') {
-      // WasteRecord is linked to Farm, Farm is linked to Admin
-      where.farm = { adminId: req.user.adminId };
+    // Admin scope: see ALL waste belonging to the admin's company —
+    // farm-linked records AND records logged by company staff
+    // (supplier orgs, other sources with no farm linkage).
+    if (req.user.adminId) {
+      where.OR = [
+        // Waste linked to a farm owned by this admin
+        { farm: { adminId: req.user.adminId } },
+        // Waste recorded by anyone in this admin's company
+        { recordedBy: { managedById: req.user.adminId } },
+      ];
     } else if (req.user.role === 'MANAGER' && req.user.farmId) {
-      where.farmId = req.user.farmId;
+      where.OR = [
+        { farmId: req.user.farmId },
+        { recordedBy: { managedById: req.user.adminId } },
+      ];
     } else if (req.user.role === 'SUPPLIER') {
       where.supplierId = req.user.id;
     } else if (req.user.role === 'DRIVER') {
@@ -294,8 +301,8 @@ router.put('/:id', authenticate, async (req, res, next) => {
   }
 });
 
-// Delete waste record
-router.delete('/:id', authenticate, async (req, res, next) => {
+// Delete waste record — ADMIN role only
+router.delete('/:id', authenticate, authorize('ADMIN'), async (req, res, next) => {
   try {
     const { id } = req.params;
     

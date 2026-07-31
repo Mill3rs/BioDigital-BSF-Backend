@@ -405,8 +405,8 @@ router.put('/:id', authenticate, authorize('SUPER_ADMIN', 'ADMIN', 'MANAGER'), a
   }
 });
 
-// Delete farm
-router.delete('/:id', authenticate, authorize('SUPER_ADMIN', 'ADMIN'), authorizeFarmAccess, async (req, res, next) => {
+// Delete farm — ADMIN role only
+router.delete('/:id', authenticate, authorize('ADMIN'), authorizeFarmAccess, async (req, res, next) => {
   try {
     await prisma.farm.delete({ where: { id: req.params.id } });
     res.json({ success: true, message: 'Farm deleted successfully' });

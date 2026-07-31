@@ -226,7 +226,7 @@ router.put('/:id', authenticate, authorize('SUPER_ADMIN', 'ADMIN'), async (req, 
 });
 
 // Delete user (Super Admin or Admin)
-router.delete('/:id', authenticate, authorize('SUPER_ADMIN', 'ADMIN'), async (req, res, next) => {
+router.delete('/:id', authenticate, authorize('ADMIN'), async (req, res, next) => {
   try {
     const { id } = req.params;
     
