@@ -73,8 +73,10 @@ router.get('/', authenticate, async (req, res, next) => {
       if (endDate) where.date.lte = new Date(endDate);
     }
     
-    // Admin scope: users only see waste belonging to their company
-    if (req.user.adminId) {
+    // Admin scope: users only see waste belonging to their company.
+    // Exempt "other source" records (no supplier) — these are standalone
+    // and have no farm linkage, so the farm filter would hide them.
+    if (req.user.adminId && noSupplier !== 'true') {
       // WasteRecord is linked to Farm, Farm is linked to Admin
       where.farm = { adminId: req.user.adminId };
     } else if (req.user.role === 'MANAGER' && req.user.farmId) {

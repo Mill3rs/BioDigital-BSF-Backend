@@ -105,7 +105,9 @@ const errorHandler = (err, req, res, next) => {
   }
   
   // Production vs Development error details
-  if (process.env.NODE_ENV === 'production' && !err.isOperational) {
+  // Never return stack traces in HTTP responses - they leak internal paths.
+  // Development env can differ in log verbosity but NOT in what's sent to the client.
+  if (!err.isOperational) {
     return res.status(500).json({
       success: false,
       message: 'Something went wrong. Please try again later.'
@@ -116,10 +118,8 @@ const errorHandler = (err, req, res, next) => {
     success: false,
     message,
     ...(process.env.NODE_ENV === 'development' && { 
-      stack: err.stack,
       details: err.details
-    }),
-    ...(err.details && { details: err.details })
+    })
   });
 };
 

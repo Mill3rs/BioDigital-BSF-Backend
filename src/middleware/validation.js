@@ -31,7 +31,7 @@ const commonValidations = {
   ],
   
   // Email validation
-  email: body('email').isEmail().normalizeEmail().withMessage('Valid email is required'),
+  email: body('email').isEmail().normalizeEmail({ gmail_remove_dots: false, gmail_remove_subaddress: false }).withMessage('Valid email is required'),
   
   // Password validation
   password: body('password')

@@ -135,7 +135,12 @@ class AuthController {
         data: { token, refreshToken, user },
       });
     } catch (error) {
-      next(error);
+      const statusCode = error.statusCode || error.status || 500;
+      return res.status(statusCode).json({
+        success: false,
+        message: error.message || 'Registration failed. Please try again.',
+        ...(process.env.NODE_ENV === 'development' && error.details ? { details: error.details } : {})
+      });
     }
   }
 
@@ -206,7 +211,13 @@ class AuthController {
         data: { token, refreshToken, user: userData },
       });
     } catch (error) {
-      next(error);
+      // Clean response — never leak stack traces to the client
+      const statusCode = error.statusCode || error.status || 500;
+      return res.status(statusCode).json({
+        success: false,
+        message: error.message || 'Login failed. Please try again.',
+        ...(process.env.NODE_ENV === 'development' && error.details ? { details: error.details } : {})
+      });
     }
   }
 
