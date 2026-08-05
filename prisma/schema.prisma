@@ -350,6 +350,8 @@ model WasteRecord {
   driverId          String? // Driver who collected
   driver            User?            @relation("DriverCollection", fields: [driverId], references: [id])
   vehicleId         String? // Company vehicle assigned for pickup
+  collectedAt       DateTime? // When the driver picked up the waste
+  deliveredAt       DateTime? // When the driver delivered to the plant
   vehicle           Vehicle?         @relation(fields: [vehicleId], references: [id])
 }
 

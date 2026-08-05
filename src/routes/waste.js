@@ -411,13 +411,14 @@ router.patch('/:id/assign-driver', authenticate, async (req, res, next) => {
 router.patch('/:id/collect', authenticate, async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { notes, images } = req.body;
+    const { notes, images, collectedAt } = req.body;
     
     const wasteRecord = await prisma.wasteRecord.update({
       where: { id, driverId: req.user.id },
       data: {
         status: 'COLLECTED',
         notes,
+        collectedAt: collectedAt ? new Date(collectedAt) : new Date(),
         images: images ? { push: images } : undefined,
       }
     });
@@ -432,15 +433,15 @@ router.patch('/:id/collect', authenticate, async (req, res, next) => {
   }
 });
 
-// Acknowledge waste (ADMIN/SUPER_ADMIN)
+// Acknowledge waste (ADMIN/SUPER_ADMIN, or driver completing delivery)
 router.patch('/:id/acknowledge', authenticate, async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { notes } = req.body;
+    const { notes, deliveredAt } = req.body;
     
     const wasteRecord = await prisma.wasteRecord.update({
       where: { id },
-      data: { status: 'ACKNOWLEDGED', notes }
+      data: { status: 'ACKNOWLEDGED', notes, deliveredAt: deliveredAt ? new Date(deliveredAt) : new Date() }
     });
     
     if (wasteRecord.supplierId) {
