@@ -130,9 +130,14 @@ router.get('/batches', authenticate, async (req, res, next) => {
       where.batchNumber = { startsWith: 'LC-' };
     }
     
-    // Admin scope: users only see batches belonging to their company
+    // Admin scope: see ALL batches belonging to the admin's company —
+    // farm-linked batches AND batches created by company staff
+    // (e.g. lifecycle batches have no farm linkage).
     if (req.user.adminId) {
-      where.farm = { adminId: req.user.adminId };
+      where.OR = [
+        { farm: { adminId: req.user.adminId } },
+        { createdBy: { managedById: req.user.adminId } },
+      ];
     } else if (req.user.role === 'MANAGER' && req.user.farmId) {
       where.farmId = req.user.farmId;
     }
