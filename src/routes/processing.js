@@ -410,14 +410,24 @@ router.post('/batches/:id/add-waste', authenticate, authorize('MANAGER', 'ADMIN'
       throw new AppError('Batch not found', 404);
     }
 
+    // Deduplicate — the same record must not be added to a batch twice
+    const uniqueIds = [...new Set(wasteRecordIds)];
+
     // Fetch current waste records to calculate remaining quantities
     const wasteRecords = await prisma.wasteRecord.findMany({
-      where: { id: { in: wasteRecordIds } },
-      select: { id: true, sourceName: true, quantity: true, unit: true, processedQuantity: true }
+      where: { id: { in: uniqueIds } },
+      select: { id: true, sourceName: true, quantity: true, unit: true, processedQuantity: true, processingBatchId: true, status: true }
     });
 
-    // Check for waste records already linked to another batch
-    const alreadyBatched = wasteRecords.filter(r => r.processedQuantity && r.processedQuantity > 0 && r.processingBatchId && r.processingBatchId !== id);
+    if (wasteRecords.length !== uniqueIds.length) {
+      return res.status(404).json({
+        success: false,
+        message: 'One or more of the selected waste records were not found.'
+      });
+    }
+
+    // Reject records already linked to ANOTHER batch — each record belongs to one batch
+    const alreadyBatched = wasteRecords.filter(r => r.processingBatchId && r.processingBatchId !== id);
     if (alreadyBatched.length > 0) {
       return res.status(409).json({
         success: false,
@@ -425,24 +435,21 @@ router.post('/batches/:id/add-waste', authenticate, authorize('MANAGER', 'ADMIN'
       });
     }
 
-    // Validate: batch quantity must not exceed the remaining quantity of any waste record
-    const overLimitErrors = wasteRecords
-      .map((record) => {
-        const alreadyProcessed = record.processedQuantity ?? 0;
-        const remaining = record.quantity - alreadyProcessed;
-        if (batchWithQty.quantity > remaining) {
-          return `"${record.sourceName}" only has ${remaining.toFixed(2)} ${record.unit} remaining, but you are trying to batch ${batchWithQty.quantity.toFixed(2)} ${record.unit}.`;
-        }
-        return null;
-      })
-      .filter(Boolean);
+    // Reject records that are already fully processed
+    const exhaustedRecords = wasteRecords.filter(r => (r.processedQuantity ?? 0) >= r.quantity - 1e-9);
+    if (exhaustedRecords.length > 0) {
+      return res.status(409).json({
+        success: false,
+        message: `The following waste records are already fully processed and cannot be batched again: ${exhaustedRecords.map(r => `"${r.sourceName}"`).join(', ')}.`
+      });
+    }
 
-    if (overLimitErrors.length > 0) {
+    // Validate: batch quantity must not exceed the TOTAL remaining quantity of the selected records
+    const totalRemaining = wasteRecords.reduce((s, r) => s + (r.quantity - (r.processedQuantity ?? 0)), 0);
+    if (batchWithQty.quantity > totalRemaining) {
       return res.status(422).json({
         success: false,
-        message: overLimitErrors.length === 1
-          ? overLimitErrors[0]
-          : `Some waste records do not have enough remaining quantity:\n${overLimitErrors.join('\n')}`
+        message: `The batch quantity (${batchWithQty.quantity.toFixed(2)} kg) exceeds the available waste quantity (${totalRemaining.toFixed(2)} kg). Please reduce the batch quantity or select more waste records.`
       });
     }
 
@@ -452,27 +459,32 @@ router.post('/batches/:id/add-waste', authenticate, authorize('MANAGER', 'ADMIN'
       const updated = await tx.processingBatch.update({
         where: { id },
         data: {
-          wasteRecords: { connect: wasteRecordIds.map(wasteId => ({ id: wasteId })) }
+          wasteRecords: { connect: uniqueIds.map(wasteId => ({ id: wasteId })) }
         },
         include: { wasteRecords: true }
       });
 
-      // Deduct batch quantity from each waste record and set status
+      // Distribute the batch quantity across the selected records — consume
+      // each record's remaining quantity until the batch quantity is filled.
+      let toConsume = batchWithQty.quantity;
       for (const record of wasteRecords) {
+        if (toConsume <= 0) break;
         const alreadyProcessed = record.processedQuantity ?? 0;
-        const newProcessedQuantity = alreadyProcessed + batchWithQty.quantity;
-        const remaining = record.quantity - newProcessedQuantity;
-        const isExhausted = remaining <= 0;
+        const remaining = record.quantity - alreadyProcessed;
+        const consume = Math.min(remaining, toConsume);
+        const newProcessed = alreadyProcessed + consume;
+        const isExhausted = newProcessed >= record.quantity - 1e-9;
 
         await tx.wasteRecord.update({
           where: { id: record.id },
           data: {
-            processedQuantity: isExhausted ? record.quantity : newProcessedQuantity,
+            processedQuantity: isExhausted ? record.quantity : newProcessed,
             processingBatchId: id,
             status: isExhausted ? 'PROCESSED' : 'PROCESSING',
             ...(isExhausted ? { processingDate: new Date() } : {})
           }
         });
+        toConsume -= consume;
       }
 
       return updated;
