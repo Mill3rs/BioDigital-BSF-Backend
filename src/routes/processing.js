@@ -182,7 +182,8 @@ router.post('/batches', authenticate, authorize('MANAGER', 'ADMIN'), [
   body('processType').isIn(['COMPOSTING', 'ANAEROBIC_DIGESTION', 'VERMICOMPOSTING', 'BSF_LARVAE_PROCESSING', 'BLACK_SOLDIER_FLY', 'FERMENTATION', 'DRYING', 'PELLETIZING', 'OTHER']),
   body('quantity').isFloat({ gt: 0 }).withMessage('Quantity must be greater than 0'),
   body('startDate').isISO8601().withMessage('Valid start date is required'),
-  body('batchType').optional().isIn(['WASTE', 'LIFECYCLE'])
+  body('batchType').optional().isIn(['WASTE', 'LIFECYCLE']),
+  body('startStage').optional().isInt({ min: 1, max: 5 }).withMessage('Start stage must be between 1 and 5')
 ], async (req, res, next) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
@@ -200,7 +201,8 @@ router.post('/batches', authenticate, authorize('MANAGER', 'ADMIN'), [
       temperature,
       materialLevel,
       moistureContent,
-      batchType
+      batchType,
+      startStage
     } = req.body;
     
     const batch = await prisma.processingBatch.create({
@@ -232,6 +234,32 @@ router.post('/batches', authenticate, authorize('MANAGER', 'ADMIN'), [
         performedById: req.user.id
       }
     });
+
+    // If the user chose to start the BSF Life Cycle at a later stage
+    // (e.g. Larvae Rearing), seed STAGE_TRANSITION logs for the skipped
+    // stages so stage tracking starts at the selected stage.
+    if (batchType === 'LIFECYCLE' && startStage && Number(startStage) > 1) {
+      const target = Math.min(Number(startStage), 5);
+      const startTs = new Date(startDate).getTime();
+      for (let s = 2; s <= target; s++) {
+        const stage = BSF_STAGES[s - 1];
+        await prisma.activityLog.create({
+          data: {
+            batchId: batch.id,
+            action: 'NOTE_ADDED',
+            description: `Batch started at Stage ${s}: ${stage.name}`,
+            performedById: req.user.id,
+            timestamp: new Date(startTs + (s - 2) * 1000),
+            metadata: {
+              type: 'STAGE_TRANSITION',
+              stageNumber: s,
+              stageName: stage.name,
+              notes: 'Batch started directly at this stage',
+            },
+          },
+        });
+      }
+    }
     
     res.status(201).json({ success: true, data: batch });
   } catch (error) {
