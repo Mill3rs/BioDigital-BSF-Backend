@@ -9,6 +9,46 @@ const notificationService = require('../services/notificationService');
 
 const router = express.Router();
 
+// ── Per-company data isolation helpers ────────────────────────────────────────
+// An order belongs to a company when it contains the company's products
+// (farm-linked or staff-created) or was placed by the requesting user.
+function orderCompanyScopes(adminId, userId) {
+  return [
+    { items: { some: { variant: { product: { farm: { adminId } } } } } },
+    { items: { some: { variant: { product: { createdBy: { managedById: adminId } } } } } },
+    { createdById: userId },
+  ];
+}
+
+async function orderInCompanyScope(orderId, adminId, userId) {
+  if (!adminId) return false;
+  const count = await prisma.order.count({
+    where: { id: orderId, OR: orderCompanyScopes(adminId, userId) },
+  });
+  return count > 0;
+}
+
+// Access gate for order-by-id / order-mutation endpoints.
+async function assertOrderAccess(orderId, req) {
+  const order = await prisma.order.findUnique({
+    where: { id: orderId },
+    select: { id: true, customerId: true, driverId: true, farmId: true },
+  });
+  if (!order) throw new AppError('Order not found', 404);
+
+  if (req.user.role === 'SUPER_ADMIN') return order;
+  if (req.user.role === 'BUYER' && order.customerId === req.user.id) return order;
+  if (req.user.role === 'DRIVER' && order.driverId === req.user.id) return order;
+  if (req.user.role === 'MANAGER') {
+    if (req.user.farmId && order.farmId === req.user.farmId) return order;
+  }
+  if (req.user.adminId) {
+    const inScope = await orderInCompanyScope(order.id, req.user.adminId, req.user.id);
+    if (inScope) return order;
+  }
+  throw new AppError('Order not found', 404);
+}
+
 // Get orders
 router.get('/', authenticate, async (req, res, next) => {
   try {
@@ -22,7 +62,14 @@ router.get('/', authenticate, async (req, res, next) => {
     } else if (req.user.role === 'DRIVER') {
       where.driverId = req.user.id;
     } else if (req.user.role === 'MANAGER') {
-      where.farmId = req.user.farmId;
+      const scopes = req.user.adminId ? orderCompanyScopes(req.user.adminId, req.user.id) : [];
+      where.OR = [
+        ...(req.user.farmId ? [{ farmId: req.user.farmId }] : []),
+        ...scopes,
+      ];
+      if (where.OR.length === 0) delete where.OR;
+    } else if (req.user.role === 'ADMIN' && req.user.adminId) {
+      where.OR = orderCompanyScopes(req.user.adminId, req.user.id);
     }
     
     const skip = (page - 1) * limit;
@@ -118,6 +165,7 @@ router.post('/', authenticate, [
       data: {
         orderNumber: generateOrderNumber(),
         customerId: req.user.id,
+        createdById: req.user.id,
         subtotal,
         shippingCost,
         tax,
@@ -168,6 +216,8 @@ router.post('/', authenticate, [
 // Get order by ID
 router.get('/:id', authenticate, async (req, res, next) => {
   try {
+    await assertOrderAccess(req.params.id, req);
+
     const order = await prisma.order.findUnique({
       where: { id: req.params.id },
       include: {
@@ -227,8 +277,8 @@ router.put('/:id', authenticate, async (req, res, next) => {
       throw new AppError('Order not found', 404);
     }
     
-    if (order.customerId !== req.user.id && req.user.role !== 'ADMIN') {
-      throw new AppError('Access denied', 403);
+    if (order.customerId !== req.user.id && req.user.role !== 'SUPER_ADMIN') {
+      await assertOrderAccess(order.id, req);
     }
     
     if (order.status !== 'PENDING') {
@@ -261,8 +311,8 @@ router.post('/:id/cancel', authenticate, async (req, res, next) => {
       throw new AppError('Order not found', 404);
     }
     
-    if (order.customerId !== req.user.id && req.user.role !== 'ADMIN') {
-      throw new AppError('Access denied', 403);
+    if (order.customerId !== req.user.id && req.user.role !== 'SUPER_ADMIN') {
+      await assertOrderAccess(order.id, req);
     }
     
     if (order.status !== 'PENDING' && order.status !== 'CONFIRMED') {
@@ -308,8 +358,15 @@ router.post('/:id/assign-driver', authenticate, authorize('ADMIN', 'MANAGER'), [
     const { id } = req.params;
     const { driverId } = req.body;
     
+    // Order must belong to the requesting admin/manager's company.
+    await assertOrderAccess(id, req);
+    
     const driver = await prisma.user.findFirst({
-      where: { id: driverId, role: 'DRIVER' }
+      where: {
+        id: driverId,
+        role: 'DRIVER',
+        ...(req.user.adminId ? { managedById: req.user.adminId } : {}),
+      }
     });
     
     if (!driver) {
@@ -357,6 +414,14 @@ router.post('/:id/update-status', authenticate, [
     
     if (!order) {
       throw new AppError('Order not found', 404);
+    }
+    
+    // Only the buyer, the assigned driver, a SUPER_ADMIN, or the owning
+    // company's admin/manager may advance an order.
+    const isOwn = req.user.role === 'BUYER' && order.customerId === req.user.id;
+    const isAssigned = req.user.role === 'DRIVER' && order.driverId === req.user.id;
+    if (req.user.role !== 'SUPER_ADMIN' && !isOwn && !isAssigned) {
+      await assertOrderAccess(order.id, req);
     }
     
     const updateData = { status };
@@ -496,7 +561,14 @@ router.get('/stats/summary', authenticate, async (req, res, next) => {
     if (req.user.role === 'BUYER') {
       where.customerId = req.user.id;
     } else if (req.user.role === 'MANAGER') {
-      where.farmId = req.user.farmId;
+      const scopes = req.user.adminId ? orderCompanyScopes(req.user.adminId, req.user.id) : [];
+      where.OR = [
+        ...(req.user.farmId ? [{ farmId: req.user.farmId }] : []),
+        ...scopes,
+      ];
+      if (where.OR.length === 0) delete where.OR;
+    } else if (req.user.role === 'ADMIN' && req.user.adminId) {
+      where.OR = orderCompanyScopes(req.user.adminId, req.user.id);
     }
     
     const [totalOrders, completedOrders, totalRevenue, averageOrderValue, ordersByStatus] = await Promise.all([
@@ -507,17 +579,24 @@ router.get('/stats/summary', authenticate, async (req, res, next) => {
       prisma.order.groupBy({ by: ['status'], where, _count: true })
     ]);
     
-    const monthlyOrders = await prisma.$queryRaw`
-      SELECT 
-        DATE_TRUNC('month', created_at) as month,
-        COUNT(*) as count,
-        SUM(total) as revenue
-      FROM orders
-      ${where.customerId ? `WHERE customer_id = ${where.customerId}` : ''}
-      GROUP BY DATE_TRUNC('month', created_at)
-      ORDER BY month DESC
-      LIMIT 12
-    `;
+    // Monthly trend — computed from the scoped set (avoids raw SQL that
+    // referenced the wrong table/column names).
+    const orderRows = await prisma.order.findMany({
+      where,
+      select: { createdAt: true, total: true },
+    });
+    const monthMap = new Map();
+    for (const o of orderRows) {
+      const key = o.createdAt.toISOString().slice(0, 7); // YYYY-MM
+      const entry = monthMap.get(key) || { month: key, count: 0, revenue: 0 };
+      entry.count += 1;
+      entry.revenue += o.total || 0;
+      monthMap.set(key, entry);
+    }
+    const monthlyOrders = Array.from(monthMap.values())
+      .sort((a, b) => a.month.localeCompare(b.month))
+      .slice(-12)
+      .map((m) => ({ ...m, revenue: +m.revenue.toFixed(2) }));
     
     res.json({
       success: true,

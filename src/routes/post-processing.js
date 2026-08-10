@@ -6,6 +6,34 @@ const { AppError } = require('../middleware/errorHandler');
 
 const router = express.Router();
 
+// ── Per-company data isolation helpers ────────────────────────────────────────
+function batchCompanyScopes(adminId) {
+  return [
+    { farm: { adminId } },
+    { createdBy: { managedById: adminId } },
+  ];
+}
+
+// Resolve the company-scoped `where` for batch listing endpoints.
+async function batchScopeWhere(where, req, farmId) {
+  if (req.user.adminId) {
+    if (farmId) {
+      // ADMIN/MANAGER may only filter by farms their own company owns.
+      const farm = await prisma.farm.findFirst({
+        where: { id: farmId, adminId: req.user.adminId },
+        select: { id: true },
+      });
+      if (!farm) throw new AppError('Farm not found or access denied', 403);
+      where.farmId = farmId;
+    } else {
+      where.OR = batchCompanyScopes(req.user.adminId);
+    }
+  } else if (farmId) {
+    where.farmId = farmId;
+  }
+  return where;
+}
+
 const PRODUCTS = [
   'Frass Fertilizer',
   'Prepupae',
@@ -169,10 +197,7 @@ router.get('/batches', authenticate, async (req, res, next) => {
     const { farmId, page = 1, limit = 20 } = req.query;
     const where = { status: 'COMPLETED' };
 
-    if (farmId) where.farmId = farmId;
-    if (req.user.role === 'MANAGER' && req.user.farmId) {
-      where.farmId = req.user.farmId;
-    }
+    await batchScopeWhere(where, req, farmId);
 
     const skip = (Number(page) - 1) * Number(limit);
 
@@ -221,10 +246,7 @@ router.get('/summary', authenticate, async (req, res, next) => {
     const { farmId } = req.query;
     const where = { status: 'COMPLETED' };
 
-    if (farmId) where.farmId = farmId;
-    if (req.user.role === 'MANAGER' && req.user.farmId) {
-      where.farmId = req.user.farmId;
-    }
+    await batchScopeWhere(where, req, farmId);
 
     const batches = await prisma.processingBatch.findMany({
       where,

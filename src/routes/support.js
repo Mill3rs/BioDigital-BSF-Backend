@@ -11,6 +11,29 @@ const router = express.Router();
 const ADMIN_ROLES = ["SUPER_ADMIN", "ADMIN", "MANAGER"];
 const USER_ROLES = ["BUYER", "DRIVER", "SUPPLIER"];
 
+// ── Per-company data isolation ──────────────────────────────────────────────
+// For ADMIN/MANAGER: tickets are scoped to the users of their own company.
+// SUPER_ADMIN sees everything.
+function ticketCompanyScopes(req) {
+  if (req.user.role === 'SUPER_ADMIN') return {};
+  if (req.user.adminId) return { user: { managedById: req.user.adminId } };
+  return {}; // MANAGER without a company — nothing to scope to
+}
+
+// Throws 404 unless the requesting admin may view the given ticket.
+async function assertTicketAccess(ticket, req) {
+  if (req.user.role === 'SUPER_ADMIN') return;
+  if (ADMIN_ROLES.includes(req.user.role)) {
+    if (!req.user.adminId) throw new AppError("Ticket not found", 404);
+    const count = await prisma.supportTicket.count({
+      where: { id: ticket.id, user: { managedById: req.user.adminId } },
+    });
+    if (count === 0) throw new AppError("Ticket not found", 404);
+    return;
+  }
+  if (ticket.userId !== req.user.id) throw new AppError("Ticket not found", 404);
+}
+
 // Generate a ticket number: SUP-YYYYMMDD-XXXX
 function generateTicketNumber() {
   const date = new Date().toISOString().slice(0, 10).replace(/-/g, "");
@@ -139,6 +162,9 @@ router.get("/", authenticate, async (req, res, next) => {
       where.userId = req.user.id;
     } else if (!ADMIN_ROLES.includes(role)) {
       throw new AppError("Unauthorized", 403);
+    } else {
+      const scope = ticketCompanyScopes(req);
+      if (Object.keys(scope).length > 0) where.user = scope.user;
     }
 
     if (status) where.status = status;
@@ -188,9 +214,7 @@ router.get("/:id", authenticate, async (req, res, next) => {
     if (!ticket) throw new AppError("Ticket not found", 404);
 
     // Non-admin users can only view their own tickets
-    if (USER_ROLES.includes(role) && ticket.userId !== req.user.id) {
-      throw new AppError("Ticket not found", 404);
-    }
+    await assertTicketAccess(ticket, req);
 
     res.json({ success: true, data: ticket });
   } catch (error) {
@@ -218,6 +242,8 @@ router.patch("/:id/status", authenticate, async (req, res, next) => {
 
     const ticket = await prisma.supportTicket.findUnique({ where: { id } });
     if (!ticket) throw new AppError("Ticket not found", 404);
+
+    await assertTicketAccess(ticket, req);
 
     const updateData = { status };
     if (adminNote !== undefined) updateData.adminNote = adminNote;

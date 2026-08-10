@@ -15,7 +15,7 @@ const LOGO_PATH = path.join(__dirname, '../assets/logo.png');
 const router = express.Router();
 
 // Generate report
-router.post('/generate', authenticate, [
+router.post('/generate', authenticate, requireReportAccess, [
   body('type').isIn(['WASTE_SUMMARY', 'PROCESSING_EFFICIENCY', 'FINANCIAL_REPORT', 'CARBON_SAVINGS', 'PRODUCT_SALES', 'FARM_PERFORMANCE', 'DRIVER_PERFORMANCE', 'CUSTOMER_ANALYTICS', 'INVENTORY_REPORT', 'QUALITY_REPORT']),
   body('format').optional().isIn(['PDF', 'CSV', 'EXCEL']),
   body('dateRange.start').optional().isISO8601(),
@@ -39,6 +39,16 @@ router.post('/generate', authenticate, [
     if (req.user.role === 'MANAGER' && req.user.farmId) {
       where.farmId = req.user.farmId;
     } else if (farmId && req.user.role === 'ADMIN') {
+      // ADMIN may only generate reports for farms their own company owns.
+      if (req.user.adminId) {
+        const farm = await prisma.farm.findFirst({
+          where: { id: farmId, adminId: req.user.adminId },
+          select: { id: true },
+        });
+        if (!farm) {
+          return res.status(403).json({ success: false, message: 'You do not have access to this farm' });
+        }
+      }
       where.farmId = farmId;
     }
     
@@ -393,12 +403,69 @@ function buildDateWhere(startDate, endDate, field = 'createdAt') {
   return { [field]: w };
 }
 
+// ─── Per-company data isolation ────────────────────────────────────────────
+// Reports are only served to the company console (SUPER_ADMIN / ADMIN / MANAGER).
+function requireReportAccess(req, res, next) {
+  if (!['SUPER_ADMIN', 'ADMIN', 'MANAGER'].includes(req.user.role)) {
+    return res.status(403).json({ success: false, message: 'Access denied. Only admins and managers can view reports.' });
+  }
+  next();
+}
+
+// Builds a Prisma { OR: [...] } clause scoping a resource to one company.
+// Returns {} for SUPER_ADMIN or users without a company (no restriction).
+function companyScope(adminId, userId, kind) {
+  if (!adminId) return {};
+  const scopes = {
+    user: [{ managedById: adminId }],
+    buyer: [
+      { orders: { some: { items: { some: { variant: { product: { farm: { adminId } } } } } } } },
+      { orders: { some: { items: { some: { variant: { product: { createdBy: { managedById: adminId } } } } } } } },
+    ],
+    waste: [
+      { farm: { adminId } },
+      { recordedBy: { managedById: adminId } },
+    ],
+    batch: [
+      { farm: { adminId } },
+      { createdBy: { managedById: adminId } },
+    ],
+    product: [
+      { farm: { adminId } },
+      { createdBy: { managedById: adminId } },
+      { createdById: userId },
+    ],
+    variant: [
+      { product: { farm: { adminId } } },
+      { product: { createdBy: { managedById: adminId } } },
+      { product: { createdById: userId } },
+    ],
+    order: [
+      { items: { some: { variant: { product: { farm: { adminId } } } } } },
+      { items: { some: { variant: { product: { createdBy: { managedById: adminId } } } } } },
+      { createdById: userId },
+    ],
+    vehicle: [
+      { wasteRecords: { some: { farm: { adminId } } } },
+      { wasteRecords: { some: { recordedBy: { managedById: adminId } } } },
+    ],
+    payout: [{ adminId }],
+    support: [{ user: { managedById: adminId } }],
+  };
+  return { OR: scopes[kind] };
+}
+
+function reportCtx(req) {
+  return { adminId: req.user.adminId, userId: req.user.id };
+}
+
 // ─── Drivers Report ────────────────────────────────────────────────────────
-router.get('/drivers', authenticate, async (req, res, next) => {
+router.get('/drivers', authenticate, requireReportAccess, async (req, res, next) => {
   try {
     const { startDate, endDate } = req.query;
+    const scope = companyScope(reportCtx(req).adminId, reportCtx(req).userId, 'user');
     const drivers = await prisma.user.findMany({
-      where: { role: 'DRIVER', ...buildDateWhere(startDate, endDate) },
+      where: { role: 'DRIVER', ...buildDateWhere(startDate, endDate), ...scope },
       include: {
         driverProfile: { select: { status: true, vehicleType: true, vehiclePlateNumber: true, rating: true } },
         deliveries: {
@@ -431,11 +498,12 @@ router.get('/drivers', authenticate, async (req, res, next) => {
 });
 
 // ─── Suppliers Report ──────────────────────────────────────────────────────
-router.get('/suppliers', authenticate, async (req, res, next) => {
+router.get('/suppliers', authenticate, requireReportAccess, async (req, res, next) => {
   try {
     const { startDate, endDate } = req.query;
+    const scope = companyScope(reportCtx(req).adminId, reportCtx(req).userId, 'user');
     const suppliers = await prisma.user.findMany({
-      where: { role: 'SUPPLIER', ...buildDateWhere(startDate, endDate) },
+      where: { role: 'SUPPLIER', ...buildDateWhere(startDate, endDate), ...scope },
       include: {
         supplierProfile: { select: { status: true, totalWasteSupplied: true, pointsBalance: true, pointsEarned: true, rating: true, organizationName: true } },
         payoutRequests: {
@@ -468,11 +536,12 @@ router.get('/suppliers', authenticate, async (req, res, next) => {
 });
 
 // ─── Buyers Report ─────────────────────────────────────────────────────────
-router.get('/buyers', authenticate, async (req, res, next) => {
+router.get('/buyers', authenticate, requireReportAccess, async (req, res, next) => {
   try {
     const { startDate, endDate } = req.query;
+    const scope = companyScope(reportCtx(req).adminId, reportCtx(req).userId, 'buyer');
     const buyers = await prisma.user.findMany({
-      where: { role: 'BUYER', ...buildDateWhere(startDate, endDate) },
+      where: { role: 'BUYER', ...buildDateWhere(startDate, endDate), ...scope },
       include: {
         buyerProfile: { select: { status: true, companyName: true } },
         orders: {
@@ -507,11 +576,12 @@ router.get('/buyers', authenticate, async (req, res, next) => {
 });
 
 // ─── Users Report ──────────────────────────────────────────────────────────
-router.get('/users', authenticate, async (req, res, next) => {
+router.get('/users', authenticate, requireReportAccess, async (req, res, next) => {
   try {
     const { startDate, endDate } = req.query;
+    const scope = companyScope(reportCtx(req).adminId, reportCtx(req).userId, 'user');
     const users = await prisma.user.findMany({
-      where: { role: { notIn: ['SUPER_ADMIN', 'ADMIN', 'MANAGER'] }, ...buildDateWhere(startDate, endDate) },
+      where: { role: { notIn: ['SUPER_ADMIN', 'ADMIN', 'MANAGER'] }, ...buildDateWhere(startDate, endDate), ...scope },
       select: { id: true, fullName: true, email: true, role: true, status: true, createdAt: true },
       orderBy: { createdAt: 'desc' }
     });
@@ -530,11 +600,12 @@ router.get('/users', authenticate, async (req, res, next) => {
 });
 
 // ─── Orders Report ─────────────────────────────────────────────────────────
-router.get('/orders', authenticate, async (req, res, next) => {
+router.get('/orders', authenticate, requireReportAccess, async (req, res, next) => {
   try {
     const { startDate, endDate } = req.query;
+    const scope = companyScope(reportCtx(req).adminId, reportCtx(req).userId, 'order');
     const orders = await prisma.order.findMany({
-      where: { deletedAt: null, ...buildDateWhere(startDate, endDate) },
+      where: { deletedAt: null, ...buildDateWhere(startDate, endDate), ...scope },
       include: {
         customer: { select: { fullName: true } },
         driver: { select: { fullName: true } },
@@ -570,10 +641,12 @@ router.get('/orders', authenticate, async (req, res, next) => {
 });
 
 // ─── Fleet Report ──────────────────────────────────────────────────────────
-router.get('/fleet', authenticate, async (req, res, next) => {
+router.get('/fleet', authenticate, requireReportAccess, async (req, res, next) => {
   try {
     const { startDate, endDate } = req.query;
+    const scope = companyScope(reportCtx(req).adminId, reportCtx(req).userId, 'vehicle');
     const vehicles = await prisma.vehicle.findMany({
+      where: scope,
       include: {
         wasteRecords: {
           where: buildDateWhere(startDate, endDate, 'date'),
@@ -604,11 +677,12 @@ router.get('/fleet', authenticate, async (req, res, next) => {
 });
 
 // ─── Payouts Report ────────────────────────────────────────────────────────
-router.get('/payouts', authenticate, async (req, res, next) => {
+router.get('/payouts', authenticate, requireReportAccess, async (req, res, next) => {
   try {
     const { startDate, endDate } = req.query;
+    const scope = companyScope(reportCtx(req).adminId, reportCtx(req).userId, 'payout');
     const payouts = await prisma.payoutRequest.findMany({
-      where: buildDateWhere(startDate, endDate),
+      where: { ...buildDateWhere(startDate, endDate), ...scope },
       include: { supplier: { select: { fullName: true, email: true } } },
       orderBy: { createdAt: 'desc' }
     });
@@ -639,11 +713,12 @@ router.get('/payouts', authenticate, async (req, res, next) => {
 });
 
 // ─── Support Report ────────────────────────────────────────────────────────
-router.get('/support', authenticate, async (req, res, next) => {
+router.get('/support', authenticate, requireReportAccess, async (req, res, next) => {
   try {
     const { startDate, endDate } = req.query;
+    const scope = companyScope(reportCtx(req).adminId, reportCtx(req).userId, 'support');
     const tickets = await prisma.supportTicket.findMany({
-      where: buildDateWhere(startDate, endDate),
+      where: { ...buildDateWhere(startDate, endDate), ...scope },
       include: { user: { select: { fullName: true } } },
       orderBy: { createdAt: 'desc' }
     });
@@ -673,12 +748,13 @@ router.get('/support', authenticate, async (req, res, next) => {
 });
 
 // ─── Waste Report ──────────────────────────────────────────────────────────
-router.get('/waste', authenticate, async (req, res, next) => {
+router.get('/waste', authenticate, requireReportAccess, async (req, res, next) => {
   try {
     const { startDate, endDate } = req.query;
     const dateFilter = buildDateWhere(startDate, endDate, 'date');
+    const scope = companyScope(reportCtx(req).adminId, reportCtx(req).userId, 'waste');
     const records = await prisma.wasteRecord.findMany({
-      where: { deletedAt: null, ...dateFilter },
+      where: { deletedAt: null, ...dateFilter, ...scope },
       include: {
         supplier: { select: { fullName: true } },
         driver: { select: { fullName: true } },
@@ -704,7 +780,7 @@ router.get('/waste', authenticate, async (req, res, next) => {
     rows.forEach(r => { byType[r.sourceType] = (byType[r.sourceType] || 0) + r.quantity; });
     const chartData = Object.entries(byType).map(([type, quantity]) => ({ type, quantity: +quantity.toFixed(2) }));
     const agg = await prisma.wasteRecord.aggregate({
-      where: { deletedAt: null, ...dateFilter },
+      where: { deletedAt: null, ...dateFilter, ...scope },
       _sum: { quantity: true, carbonSaved: true, pointsAwarded: true },
       _count: true
     });
@@ -721,18 +797,19 @@ router.get('/waste', authenticate, async (req, res, next) => {
 });
 
 // ─── Processed / Unprocessed Waste Report ─────────────────────────────────
-router.get('/processed-waste', authenticate, async (req, res, next) => {
+router.get('/processed-waste', authenticate, requireReportAccess, async (req, res, next) => {
   try {
     const { startDate, endDate } = req.query;
     const dateFilter = buildDateWhere(startDate, endDate, 'date');
+    const scope = companyScope(reportCtx(req).adminId, reportCtx(req).userId, 'waste');
     const [processed, unprocessed] = await Promise.all([
       prisma.wasteRecord.findMany({
-        where: { deletedAt: null, status: 'PROCESSED', ...dateFilter },
+        where: { deletedAt: null, status: 'PROCESSED', ...dateFilter, ...scope },
         include: { supplier: { select: { fullName: true } }, processingBatch: { select: { batchNumber: true } } },
         orderBy: { date: 'desc' }
       }),
       prisma.wasteRecord.findMany({
-        where: { deletedAt: null, status: { in: ['PENDING', 'SCHEDULED', 'COLLECTED', 'ACKNOWLEDGED'] }, ...dateFilter },
+        where: { deletedAt: null, status: { in: ['PENDING', 'SCHEDULED', 'COLLECTED', 'ACKNOWLEDGED'] }, ...dateFilter, ...scope },
         include: { supplier: { select: { fullName: true } } },
         orderBy: { date: 'desc' }
       })
@@ -755,11 +832,12 @@ router.get('/processed-waste', authenticate, async (req, res, next) => {
 });
 
 // ─── Batches Report ────────────────────────────────────────────────────────
-router.get('/batches', authenticate, async (req, res, next) => {
+router.get('/batches', authenticate, requireReportAccess, async (req, res, next) => {
   try {
     const { startDate, endDate } = req.query;
+    const scope = companyScope(reportCtx(req).adminId, reportCtx(req).userId, 'batch');
     const batches = await prisma.processingBatch.findMany({
-      where: buildDateWhere(startDate, endDate, 'startDate'),
+      where: { ...buildDateWhere(startDate, endDate, 'startDate'), ...scope },
       include: {
         farm: { select: { name: true } },
         createdBy: { select: { fullName: true } },
@@ -796,11 +874,12 @@ router.get('/batches', authenticate, async (req, res, next) => {
 });
 
 // ─── Harvested Batches Report ──────────────────────────────────────────────
-router.get('/harvested', authenticate, async (req, res, next) => {
+router.get('/harvested', authenticate, requireReportAccess, async (req, res, next) => {
   try {
     const { startDate, endDate } = req.query;
+    const scope = companyScope(reportCtx(req).adminId, reportCtx(req).userId, 'batch');
     const batches = await prisma.processingBatch.findMany({
-      where: { status: 'COMPLETED', ...buildDateWhere(startDate, endDate, 'completedAt') },
+      where: { status: 'COMPLETED', ...buildDateWhere(startDate, endDate, 'completedAt'), ...scope },
       include: { farm: { select: { name: true } } },
       orderBy: { completedAt: 'desc' }
     });
@@ -830,11 +909,12 @@ router.get('/harvested', authenticate, async (req, res, next) => {
 });
 
 // ─── Products Report ───────────────────────────────────────────────────────
-router.get('/products', authenticate, async (req, res, next) => {
+router.get('/products', authenticate, requireReportAccess, async (req, res, next) => {
   try {
     const { startDate, endDate } = req.query;
+    const scope = companyScope(reportCtx(req).adminId, reportCtx(req).userId, 'product');
     const products = await prisma.product.findMany({
-      where: { deletedAt: null, ...buildDateWhere(startDate, endDate) },
+      where: { deletedAt: null, ...buildDateWhere(startDate, endDate), ...scope },
       include: {
         variants: { select: { id: true, quantity: true, price: true, isActive: true } },
         farm: { select: { name: true } }
@@ -867,11 +947,12 @@ router.get('/products', authenticate, async (req, res, next) => {
 });
 
 // ─── Bags (Product Variants) Report ───────────────────────────────────────
-router.get('/bags', authenticate, async (req, res, next) => {
+router.get('/bags', authenticate, requireReportAccess, async (req, res, next) => {
   try {
     const { startDate, endDate } = req.query;
+    const scope = companyScope(reportCtx(req).adminId, reportCtx(req).userId, 'variant');
     const variants = await prisma.productVariant.findMany({
-      where: buildDateWhere(startDate, endDate),
+      where: { ...buildDateWhere(startDate, endDate), ...scope },
       include: { product: { select: { name: true, category: true } } },
       orderBy: { createdAt: 'desc' }
     });
@@ -903,11 +984,12 @@ router.get('/bags', authenticate, async (req, res, next) => {
 });
 
 // ─── Costs Report ──────────────────────────────────────────────────────────
-router.get('/costs', authenticate, async (req, res, next) => {
+router.get('/costs', authenticate, requireReportAccess, async (req, res, next) => {
   try {
     const { startDate, endDate } = req.query;
+    const scope = companyScope(reportCtx(req).adminId, reportCtx(req).userId, 'variant');
     const variants = await prisma.productVariant.findMany({
-      where: { cost: { not: null }, ...buildDateWhere(startDate, endDate) },
+      where: { cost: { not: null }, ...buildDateWhere(startDate, endDate), ...scope },
       include: { product: { select: { name: true, category: true } } }
     });
     const rows = variants.map(v => ({
@@ -934,11 +1016,12 @@ router.get('/costs', authenticate, async (req, res, next) => {
 });
 
 // ─── Revenue / Sales Report ────────────────────────────────────────────────
-router.get('/revenue', authenticate, async (req, res, next) => {
+router.get('/revenue', authenticate, requireReportAccess, async (req, res, next) => {
   try {
     const { startDate, endDate } = req.query;
+    const scope = companyScope(reportCtx(req).adminId, reportCtx(req).userId, 'order');
     const orders = await prisma.order.findMany({
-      where: { status: 'COMPLETED', deletedAt: null, ...buildDateWhere(startDate, endDate) },
+      where: { status: 'COMPLETED', deletedAt: null, ...buildDateWhere(startDate, endDate), ...scope },
       include: {
         customer: { select: { fullName: true } },
         items: { select: { quantity: true } }
@@ -972,11 +1055,12 @@ router.get('/revenue', authenticate, async (req, res, next) => {
 });
 
 // ─── Processing Report ─────────────────────────────────────────────────────
-router.get('/processing', authenticate, async (req, res, next) => {
+router.get('/processing', authenticate, requireReportAccess, async (req, res, next) => {
   try {
     const { startDate, endDate } = req.query;
+    const scope = companyScope(reportCtx(req).adminId, reportCtx(req).userId, 'batch');
     const batches = await prisma.processingBatch.findMany({
-      where: buildDateWhere(startDate, endDate, 'startDate'),
+      where: { ...buildDateWhere(startDate, endDate, 'startDate'), ...scope },
       select: { id: true, batchNumber: true, processType: true, status: true, quantity: true, conversionRate: true, qualityScore: true, startDate: true }
     });
     const completed = batches.filter(b => b.status === 'COMPLETED');
@@ -1008,11 +1092,12 @@ function toCSV(rows) {
   return [headers.join(','), ...rows.map(r => headers.map(h => esc(r[h])).join(','))].join('\n');
 }
 
-async function fetchExportRows(type, startDate, endDate) {
+async function fetchExportRows(type, startDate, endDate, adminId, userId) {
   switch (type) {
     case 'drivers': {
+      const scope = companyScope(adminId, userId, 'user');
       const drivers = await prisma.user.findMany({
-        where: { role: 'DRIVER', ...buildDateWhere(startDate, endDate) },
+        where: { role: 'DRIVER', ...buildDateWhere(startDate, endDate), ...scope },
         include: {
           driverProfile: { select: { status: true, vehicleType: true, vehiclePlateNumber: true, rating: true } },
           deliveries: { where: buildDateWhere(startDate, endDate), select: { id: true, total: true, status: true } }
@@ -1029,8 +1114,9 @@ async function fetchExportRows(type, startDate, endDate) {
       }));
     }
     case 'suppliers': {
+      const scope = companyScope(adminId, userId, 'user');
       const suppliers = await prisma.user.findMany({
-        where: { role: 'SUPPLIER', ...buildDateWhere(startDate, endDate) },
+        where: { role: 'SUPPLIER', ...buildDateWhere(startDate, endDate), ...scope },
         include: {
           supplierProfile: { select: { status: true, totalWasteSupplied: true, pointsBalance: true, rating: true, organizationName: true } },
           payoutRequests: { where: { status: 'PAID', ...buildDateWhere(startDate, endDate) }, select: { amountGhs: true } }
@@ -1047,8 +1133,9 @@ async function fetchExportRows(type, startDate, endDate) {
       }));
     }
     case 'buyers': {
+      const scope = companyScope(adminId, userId, 'buyer');
       const buyers = await prisma.user.findMany({
-        where: { role: 'BUYER', ...buildDateWhere(startDate, endDate) },
+        where: { role: 'BUYER', ...buildDateWhere(startDate, endDate), ...scope },
         include: {
           buyerProfile: { select: { status: true, companyName: true } },
           orders: { where: { status: 'COMPLETED', ...buildDateWhere(startDate, endDate) }, select: { id: true, total: true, createdAt: true }, orderBy: { createdAt: 'desc' } }
@@ -1064,16 +1151,18 @@ async function fetchExportRows(type, startDate, endDate) {
       }));
     }
     case 'users': {
+      const scope = companyScope(adminId, userId, 'user');
       const users = await prisma.user.findMany({
-        where: { role: { notIn: ['SUPER_ADMIN', 'ADMIN', 'MANAGER'] }, ...buildDateWhere(startDate, endDate) },
+        where: { role: { notIn: ['SUPER_ADMIN', 'ADMIN', 'MANAGER'] }, ...buildDateWhere(startDate, endDate), ...scope },
         select: { fullName: true, email: true, role: true, status: true, createdAt: true },
         orderBy: { createdAt: 'desc' }
       });
       return users.map(u => ({ name: u.fullName, email: u.email ?? '-', role: u.role, status: u.status }));
     }
     case 'orders': {
+      const scope = companyScope(adminId, userId, 'order');
       const orders = await prisma.order.findMany({
-        where: { deletedAt: null, ...buildDateWhere(startDate, endDate) },
+        where: { deletedAt: null, ...buildDateWhere(startDate, endDate), ...scope },
         include: {
           customer: { select: { fullName: true } },
           driver: { select: { fullName: true } },
@@ -1089,7 +1178,9 @@ async function fetchExportRows(type, startDate, endDate) {
       }));
     }
     case 'fleet': {
+      const scope = companyScope(adminId, userId, 'vehicle');
       const vehicles = await prisma.vehicle.findMany({
+        where: scope,
         include: { wasteRecords: { where: buildDateWhere(startDate, endDate, 'date'), select: { id: true, quantity: true, date: true } } },
         orderBy: { createdAt: 'desc' }
       });
@@ -1101,8 +1192,9 @@ async function fetchExportRows(type, startDate, endDate) {
       }));
     }
     case 'payouts': {
+      const scope = companyScope(adminId, userId, 'payout');
       const payouts = await prisma.payoutRequest.findMany({
-        where: buildDateWhere(startDate, endDate),
+        where: { ...buildDateWhere(startDate, endDate), ...scope },
         include: { supplier: { select: { fullName: true, email: true } } },
         orderBy: { createdAt: 'desc' }
       });
@@ -1113,8 +1205,9 @@ async function fetchExportRows(type, startDate, endDate) {
       }));
     }
     case 'support': {
+      const scope = companyScope(adminId, userId, 'support');
       const tickets = await prisma.supportTicket.findMany({
-        where: buildDateWhere(startDate, endDate),
+        where: { ...buildDateWhere(startDate, endDate), ...scope },
         include: { user: { select: { fullName: true } } },
         orderBy: { createdAt: 'desc' }
       });
@@ -1125,8 +1218,9 @@ async function fetchExportRows(type, startDate, endDate) {
     }
     case 'waste': {
       const dateFilter = buildDateWhere(startDate, endDate, 'date');
+      const scope = companyScope(adminId, userId, 'waste');
       const records = await prisma.wasteRecord.findMany({
-        where: { deletedAt: null, ...dateFilter },
+        where: { deletedAt: null, ...dateFilter, ...scope },
         include: {
           supplier: { select: { fullName: true } },
           driver: { select: { fullName: true } },
@@ -1142,14 +1236,15 @@ async function fetchExportRows(type, startDate, endDate) {
     }
     case 'processed-waste': {
       const dateFilter = buildDateWhere(startDate, endDate, 'date');
+      const scope = companyScope(adminId, userId, 'waste');
       const [processed, unprocessed] = await Promise.all([
         prisma.wasteRecord.findMany({
-          where: { deletedAt: null, status: 'PROCESSED', ...dateFilter },
+          where: { deletedAt: null, status: 'PROCESSED', ...dateFilter, ...scope },
           include: { supplier: { select: { fullName: true } }, processingBatch: { select: { batchNumber: true } } },
           orderBy: { date: 'desc' }
         }),
         prisma.wasteRecord.findMany({
-          where: { deletedAt: null, status: { in: ['PENDING', 'SCHEDULED', 'COLLECTED', 'ACKNOWLEDGED'] }, ...dateFilter },
+          where: { deletedAt: null, status: { in: ['PENDING', 'SCHEDULED', 'COLLECTED', 'ACKNOWLEDGED'] }, ...dateFilter, ...scope },
           include: { supplier: { select: { fullName: true } } },
           orderBy: { date: 'desc' }
         })
@@ -1160,8 +1255,9 @@ async function fetchExportRows(type, startDate, endDate) {
       ];
     }
     case 'batches': {
+      const scope = companyScope(adminId, userId, 'batch');
       const batches = await prisma.processingBatch.findMany({
-        where: buildDateWhere(startDate, endDate, 'startDate'),
+        where: { ...buildDateWhere(startDate, endDate, 'startDate'), ...scope },
         include: {
           farm: { select: { name: true } },
           createdBy: { select: { fullName: true } },
@@ -1178,8 +1274,9 @@ async function fetchExportRows(type, startDate, endDate) {
       }));
     }
     case 'harvested': {
+      const scope = companyScope(adminId, userId, 'batch');
       const batches = await prisma.processingBatch.findMany({
-        where: { status: 'COMPLETED', ...buildDateWhere(startDate, endDate, 'completedAt') },
+        where: { status: 'COMPLETED', ...buildDateWhere(startDate, endDate, 'completedAt'), ...scope },
         include: { farm: { select: { name: true } } },
         orderBy: { completedAt: 'desc' }
       });
@@ -1191,8 +1288,9 @@ async function fetchExportRows(type, startDate, endDate) {
       }));
     }
     case 'products': {
+      const scope = companyScope(adminId, userId, 'product');
       const products = await prisma.product.findMany({
-        where: { deletedAt: null, ...buildDateWhere(startDate, endDate) },
+        where: { deletedAt: null, ...buildDateWhere(startDate, endDate), ...scope },
         include: {
           variants: { select: { quantity: true, price: true } },
           farm: { select: { name: true } }
@@ -1208,8 +1306,9 @@ async function fetchExportRows(type, startDate, endDate) {
       }));
     }
     case 'bags': {
+      const scope = companyScope(adminId, userId, 'variant');
       const variants = await prisma.productVariant.findMany({
-        where: buildDateWhere(startDate, endDate),
+        where: { ...buildDateWhere(startDate, endDate), ...scope },
         include: { product: { select: { name: true, category: true } } },
         orderBy: { createdAt: 'desc' }
       });
@@ -1222,8 +1321,9 @@ async function fetchExportRows(type, startDate, endDate) {
       }));
     }
     case 'costs': {
+      const scope = companyScope(adminId, userId, 'variant');
       const variants = await prisma.productVariant.findMany({
-        where: { cost: { not: null }, ...buildDateWhere(startDate, endDate) },
+        where: { cost: { not: null }, ...buildDateWhere(startDate, endDate), ...scope },
         include: { product: { select: { name: true, category: true } } }
       });
       return variants.map(v => ({
@@ -1236,8 +1336,9 @@ async function fetchExportRows(type, startDate, endDate) {
       }));
     }
     case 'revenue': {
+      const scope = companyScope(adminId, userId, 'order');
       const orders = await prisma.order.findMany({
-        where: { status: 'COMPLETED', deletedAt: null, ...buildDateWhere(startDate, endDate) },
+        where: { status: 'COMPLETED', deletedAt: null, ...buildDateWhere(startDate, endDate), ...scope },
         include: {
           customer: { select: { fullName: true } },
           items: { select: { quantity: true } }
@@ -1257,7 +1358,7 @@ async function fetchExportRows(type, startDate, endDate) {
 }
 
 // ─── Export CSV ────────────────────────────────────────────────────────────
-router.get('/export/:type', authenticate, async (req, res, next) => {
+router.get('/export/:type', authenticate, requireReportAccess, async (req, res, next) => {
   try {
     const { type } = req.params;
     const { startDate, endDate } = req.query;
@@ -1265,7 +1366,8 @@ router.get('/export/:type', authenticate, async (req, res, next) => {
     if (!validTypes.includes(type)) {
       return res.status(400).json({ success: false, message: 'Invalid report type' });
     }
-    const rows = await fetchExportRows(type, startDate, endDate);
+    const ctx = reportCtx(req);
+    const rows = await fetchExportRows(type, startDate, endDate, ctx.adminId, ctx.userId);
     const reportLabel = type.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
     const generatedAt = new Date().toISOString().slice(0, 19).replace('T', ' ');
     const periodLine = startDate || endDate
@@ -1286,7 +1388,7 @@ router.get('/export/:type', authenticate, async (req, res, next) => {
 });
 
 // ─── Export PDF ────────────────────────────────────────────────────────────
-router.get('/export/pdf/:type', authenticate, async (req, res, next) => {
+router.get('/export/pdf/:type', authenticate, requireReportAccess, async (req, res, next) => {
   try {
     const { type } = req.params;
     const { startDate, endDate } = req.query;
@@ -1295,7 +1397,8 @@ router.get('/export/pdf/:type', authenticate, async (req, res, next) => {
       return res.status(400).json({ success: false, message: 'Invalid report type' });
     }
 
-    const rows = await fetchExportRows(type, startDate, endDate);
+    const ctx = reportCtx(req);
+    const rows = await fetchExportRows(type, startDate, endDate, ctx.adminId, ctx.userId);
     const reportLabel = type.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
     const generatedAt = new Date().toISOString().slice(0, 19).replace('T', ' ');
     const periodLine = startDate || endDate

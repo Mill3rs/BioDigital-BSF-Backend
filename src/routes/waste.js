@@ -12,6 +12,31 @@ const { broadcastToRole, sendToUser } = require('../sockets');
 
 const router = express.Router();
 
+// ── Per-company data isolation helpers ────────────────────────────────────────
+function wasteCompanyScopes(adminId) {
+  return [
+    { farm: { adminId } },
+    { recordedBy: { managedById: adminId } },
+  ];
+}
+
+// Throws 404 unless the requesting user may act on the given waste record.
+async function assertWasteAccess(id, req) {
+  if (req.user.role === 'SUPER_ADMIN') return;
+  const scopes = [];
+  if (req.user.role === 'DRIVER') scopes.push({ driverId: req.user.id });
+  else if (req.user.role === 'SUPPLIER') scopes.push({ supplierId: req.user.id });
+  else if (req.user.role === 'MANAGER' && req.user.farmId) {
+    scopes.push({ farmId: req.user.farmId });
+    if (req.user.adminId) scopes.push(...wasteCompanyScopes(req.user.adminId));
+  } else if (req.user.adminId) {
+    scopes.push(...wasteCompanyScopes(req.user.adminId));
+  }
+  if (scopes.length === 0) throw new AppError('Waste record not found', 404);
+  const count = await prisma.wasteRecord.count({ where: { id, OR: scopes } });
+  if (count === 0) throw new AppError('Waste record not found', 404);
+}
+
 // Helper: notify admins + managers about new waste record
 async function notifyAdminsAndManagers(wasteRecord) {
   try {
@@ -308,6 +333,7 @@ router.post('/', authenticate, async (req, res, next) => {
 router.put('/:id', authenticate, async (req, res, next) => {
   try {
     const { id } = req.params;
+    await assertWasteAccess(id, req);
     const updateData = { ...req.body };
     
     if (updateData.quantity) updateData.quantity = parseFloat(updateData.quantity);
@@ -338,6 +364,8 @@ router.delete('/:id', authenticate, authorize('ADMIN'), async (req, res, next) =
     if (!wasteRecord) {
       throw new AppError('Waste record not found', 404);
     }
+    
+    await assertWasteAccess(id, req);
     
     await prisma.wasteRecord.delete({ where: { id } });
     
@@ -371,6 +399,18 @@ router.patch('/:id/assign-driver', authenticate, async (req, res, next) => {
     if (!driverId) {
       throw new AppError('Driver ID is required', 400);
     }
+    
+    await assertWasteAccess(id, req);
+    
+    const driver = await prisma.user.findFirst({
+      where: {
+        id: driverId,
+        role: 'DRIVER',
+        ...(req.user.adminId ? { managedById: req.user.adminId } : {}),
+      },
+      select: { id: true },
+    });
+    if (!driver) throw new AppError('Driver not found or not part of your company', 404);
     
     const wasteRecord = await prisma.wasteRecord.update({
       where: { id },
@@ -439,6 +479,8 @@ router.patch('/:id/acknowledge', authenticate, async (req, res, next) => {
     const { id } = req.params;
     const { notes, deliveredAt } = req.body;
     
+    await assertWasteAccess(id, req);
+    
     const wasteRecord = await prisma.wasteRecord.update({
       where: { id },
       data: { status: 'ACKNOWLEDGED', notes, deliveredAt: deliveredAt ? new Date(deliveredAt) : new Date() }
@@ -463,6 +505,8 @@ router.patch('/:id/no-show', authenticate, async (req, res, next) => {
     const existing = await prisma.wasteRecord.findUnique({ where: { id } });
     if (!existing) throw new AppError('Waste record not found', 404);
     
+    await assertWasteAccess(id, req);
+    
     const wasteRecord = await prisma.wasteRecord.update({
       where: { id },
       data: { status: 'NO_SHOW', notes }
@@ -484,9 +528,16 @@ router.get('/summary/stats', authenticate, async (req, res, next) => {
     let where = {};
     
     if (req.user.role === 'MANAGER' && req.user.farmId) {
-      where.farmId = req.user.farmId;
+      where.OR = [
+        { farmId: req.user.farmId },
+        ...(req.user.adminId ? wasteCompanyScopes(req.user.adminId) : []),
+      ];
     } else if (req.user.role === 'SUPPLIER') {
       where.supplierId = req.user.id;
+    } else if (req.user.role === 'DRIVER') {
+      where.driverId = req.user.id;
+    } else if (req.user.role === 'ADMIN' && req.user.adminId) {
+      where.OR = wasteCompanyScopes(req.user.adminId);
     }
     
     const [stats, bySourceType, byStatus] = await Promise.all([

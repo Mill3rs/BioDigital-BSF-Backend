@@ -7,6 +7,32 @@ const { uploadMultiple } = require('../middleware/upload');
 
 const router = express.Router();
 
+// ── Per-company data isolation helpers ────────────────────────────────────────
+// Products belong to a company when: linked to one of the company's farms,
+// created by any company staff member, or created by the requesting user.
+function productCompanyScopes(adminId, userId) {
+  return [
+    { farm: { adminId } },
+    { createdBy: { managedById: adminId } },
+    { createdById: userId },
+  ];
+}
+
+// Only ADMIN / MANAGER (company console) are scoped. SUPER_ADMIN sees all,
+// and marketplace roles (BUYER etc.) keep browsing every product.
+function shouldScopeProducts(user) {
+  return (user.role === 'ADMIN' || user.role === 'MANAGER') && user.adminId;
+}
+
+// Throws 404 if an ADMIN/MANAGER tries to touch another company's product.
+async function assertProductAccess(productId, req) {
+  if (!shouldScopeProducts(req.user)) return;
+  const count = await prisma.product.count({
+    where: { id: productId, OR: productCompanyScopes(req.user.adminId, req.user.id) },
+  });
+  if (count === 0) throw new AppError('Product not found', 404);
+}
+
 // Get all products
 router.get('/', authenticate, async (req, res, next) => {
   try {
@@ -26,13 +52,20 @@ router.get('/', authenticate, async (req, res, next) => {
     if (status) where.status = status;
     if (farmId) where.farmId = farmId;
     
+    const conditions = [];
     if (search) {
-      where.OR = [
-        { name: { contains: search, mode: 'insensitive' } },
-        { description: { contains: search, mode: 'insensitive' } },
-        { tags: { has: search } }
-      ];
+      conditions.push({
+        OR: [
+          { name: { contains: search, mode: 'insensitive' } },
+          { description: { contains: search, mode: 'insensitive' } },
+          { tags: { has: search } }
+        ]
+      });
     }
+    if (shouldScopeProducts(req.user)) {
+      conditions.push({ OR: productCompanyScopes(req.user.adminId, req.user.id) });
+    }
+    if (conditions.length > 0) where.AND = conditions;
     
     const skip = (page - 1) * limit;
     
@@ -113,6 +146,15 @@ router.post('/', authenticate, authorize('MANAGER', 'ADMIN'), [
     } = req.body;
     
     const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+
+    // ADMIN/MANAGER may only attach the product to a farm their company owns.
+    if (farmId && req.user.adminId) {
+      const farm = await prisma.farm.findFirst({
+        where: { id: farmId, adminId: req.user.adminId },
+        select: { id: true },
+      });
+      if (!farm) throw new AppError('Farm not found or access denied', 403);
+    }
     
     const product = await prisma.product.create({
       data: {
@@ -124,6 +166,7 @@ router.post('/', authenticate, authorize('MANAGER', 'ADMIN'), [
         tags: tags || [],
         slug,
         farmId: farmId || req.user.farmId,
+        createdById: req.user.id,
         status: 'ACTIVE',
         variants: {
           create: variants.map(variant => ({
@@ -159,6 +202,8 @@ router.post('/', authenticate, authorize('MANAGER', 'ADMIN'), [
 // Get product by ID
 router.get('/:id', authenticate, async (req, res, next) => {
   try {
+    await assertProductAccess(req.params.id, req);
+
     const product = await prisma.product.findUnique({
       where: { id: req.params.id },
       include: {
@@ -193,6 +238,8 @@ router.get('/:id', authenticate, async (req, res, next) => {
 // Update product
 router.put('/:id', authenticate, authorize('MANAGER', 'ADMIN'), async (req, res, next) => {
   try {
+    await assertProductAccess(req.params.id, req);
+
     const product = await prisma.product.update({
       where: { id: req.params.id },
       data: req.body,
@@ -212,6 +259,8 @@ router.put('/:id', authenticate, authorize('MANAGER', 'ADMIN'), async (req, res,
 // Delete product
 router.delete('/:id', authenticate, authorize('ADMIN'), async (req, res, next) => {
   try {
+    await assertProductAccess(req.params.id, req);
+
     await prisma.product.delete({ where: { id: req.params.id } });
     res.json({
       success: true,
@@ -228,6 +277,7 @@ router.post('/:id/images', authenticate, authorize('MANAGER', 'ADMIN'),
   async (req, res, next) => {
     try {
       const { id } = req.params;
+      await assertProductAccess(id, req);
       const product = await prisma.product.findUnique({ where: { id }, select: { id: true, images: true } });
       if (!product) throw new AppError('Product not found', 404);
 
@@ -255,6 +305,7 @@ router.delete('/:id/images', authenticate, authorize('MANAGER', 'ADMIN'), async 
     const { url } = req.body;
     if (!url) throw new AppError('Image URL is required', 400);
 
+    await assertProductAccess(id, req);
     const product = await prisma.product.findUnique({ where: { id }, select: { id: true, images: true } });
     if (!product) throw new AppError('Product not found', 404);
 
@@ -282,6 +333,8 @@ router.post('/:id/variants', authenticate, authorize('MANAGER', 'ADMIN'), [
   }
 
   try {
+    await assertProductAccess(req.params.id, req);
+
     const product = await prisma.product.findUnique({
       where: { id: req.params.id }
     });
@@ -338,6 +391,13 @@ router.post('/:id/variants', authenticate, authorize('MANAGER', 'ADMIN'), [
 // Update product variant
 router.put('/variants/:variantId', authenticate, authorize('MANAGER', 'ADMIN'), async (req, res, next) => {
   try {
+    const variant = await prisma.productVariant.findUnique({
+      where: { id: req.params.variantId },
+      select: { id: true, productId: true },
+    });
+    if (!variant) throw new AppError('Variant not found', 404);
+    await assertProductAccess(variant.productId, req);
+
     const numericFields = ['quantity', 'price', 'comparePrice', 'cost', 'unitValue', 'minOrderQuantity', 'maxOrderQuantity', 'weight'];
     const updateData = { ...req.body };
     
@@ -347,7 +407,7 @@ router.put('/variants/:variantId', authenticate, authorize('MANAGER', 'ADMIN'), 
       }
     });
     
-    const variant = await prisma.productVariant.update({
+    const updatedVariant = await prisma.productVariant.update({
       where: { id: req.params.variantId },
       data: updateData
     });
@@ -355,7 +415,7 @@ router.put('/variants/:variantId', authenticate, authorize('MANAGER', 'ADMIN'), 
     res.json({
       success: true,
       message: 'Variant updated successfully',
-      data: variant
+      data: updatedVariant
     });
   } catch (error) {
     next(error);
@@ -365,6 +425,13 @@ router.put('/variants/:variantId', authenticate, authorize('MANAGER', 'ADMIN'), 
 // Delete product variant
 router.delete('/variants/:variantId', authenticate, authorize('ADMIN'), async (req, res, next) => {
   try {
+    const variant = await prisma.productVariant.findUnique({
+      where: { id: req.params.variantId },
+      select: { id: true, productId: true },
+    });
+    if (!variant) throw new AppError('Variant not found', 404);
+    await assertProductAccess(variant.productId, req);
+
     await prisma.productVariant.delete({
       where: { id: req.params.variantId }
     });
@@ -506,6 +573,8 @@ router.get('/categories/list', authenticate, async (req, res) => {
  */
 router.get('/:id/traceability', authenticate, async (req, res, next) => {
   try {
+    await assertProductAccess(req.params.id, req);
+
     const product = await prisma.product.findUnique({
       where: { id: req.params.id },
       include: {

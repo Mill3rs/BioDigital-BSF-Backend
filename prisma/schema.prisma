@@ -1,5 +1,6 @@
 generator client {
-  provider = "prisma-client-js"
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "debian-openssl-1.1.x"]
 }
 
 datasource db {
@@ -56,6 +57,8 @@ model User {
   offlineSyncs      OfflineSync[]
   qualityChecks     QualityCheck[]
   productReviews    ProductReview[]
+  createdProducts   Product[]         @relation("CreatedProducts")
+  createdOrders     Order[]           @relation("CreatedOrders")
   cart              Cart?
   verifiedDrivers   DriverProfile[]   @relation("VerifiedDrivers")
   verifiedSuppliers SupplierProfile[] @relation("VerifiedSuppliers")
@@ -386,6 +389,7 @@ model Vehicle {
   model       String?
   color       String?
   isActive    Boolean       @default(true)
+  adminId     String?       // Owning company (Admin.id) — per-company isolation
   createdAt   DateTime      @default(now())
   updatedAt   DateTime      @updatedAt
 
@@ -578,10 +582,12 @@ model Product {
   updatedAt DateTime @updatedAt
 
   // Relations
-  farmId   String?
-  farm     Farm?            @relation(fields: [farmId], references: [id])
-  variants ProductVariant[]
-  reviews  ProductReview[]
+  farmId      String?
+  farm        Farm?            @relation(fields: [farmId], references: [id])
+  createdById String?
+  createdBy   User?            @relation("CreatedProducts", fields: [createdById], references: [id])
+  variants    ProductVariant[]
+  reviews     ProductReview[]
 }
 
 enum ProductCategory {
@@ -679,13 +685,15 @@ model Order {
   updatedAt DateTime @updatedAt
 
   // Relations
-  items    OrderItem[]
-  driverId String?
-  driver   User?       @relation("DriverDeliveries", fields: [driverId], references: [id])
-  farmId   String?
-  farm     Farm?       @relation(fields: [farmId], references: [id])
-  invoice  Invoice?
-  shipment Shipment?
+  items       OrderItem[]
+  driverId    String?
+  driver      User?       @relation("DriverDeliveries", fields: [driverId], references: [id])
+  farmId      String?
+  farm        Farm?       @relation(fields: [farmId], references: [id])
+  createdById String?
+  createdBy   User?       @relation("CreatedOrders", fields: [createdById], references: [id])
+  invoice     Invoice?
+  shipment    Shipment?
 }
 
 enum OrderStatus {

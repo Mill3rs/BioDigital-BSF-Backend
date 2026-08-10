@@ -5,6 +5,22 @@ const { authenticate, authorize } = require('../middleware/auth');
 
 const router = express.Router();
 
+// ── Per-company data isolation ──────────────────────────────────────────────
+// SUPER_ADMIN sees all payout requests; ADMIN/MANAGER only see requests that
+// belong to their own company (PayoutRequest.adminId).
+function payoutCompanyWhere(req) {
+  if (req.user.role === 'SUPER_ADMIN' || !req.user.adminId) return {};
+  return { adminId: req.user.adminId };
+}
+
+// Throws 404 unless the requesting admin may act on the given payout request.
+async function assertPayoutAccess(request, req) {
+  if (req.user.role === 'SUPER_ADMIN') return;
+  if (request.adminId !== req.user.adminId) {
+    throw new AppError('Payout request not found', 404);
+  }
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 async function getPayoutRatePerPoint() {
   const setting = await prisma.systemSetting.findUnique({ where: { key: 'payout_rate_per_point' } });
@@ -167,7 +183,7 @@ router.get('/my-requests', authenticate, authorize('SUPPLIER'), async (req, res,
 router.get('/admin-requests', authenticate, authorize('ADMIN', 'MANAGER', 'SUPER_ADMIN'), async (req, res, next) => {
   try {
     const { status } = req.query;
-    const where = {};
+    const where = { ...payoutCompanyWhere(req) };
 
     if (status) where.status = status;
 
@@ -197,6 +213,7 @@ router.patch(
 
       const request = await prisma.payoutRequest.findUnique({ where: { id } });
       if (!request) return res.status(404).json({ success: false, message: 'Payout request not found' });
+      await assertPayoutAccess(request, req);
       if (request.status !== 'PENDING') {
         return res.status(400).json({ success: false, message: `Request is already ${request.status}` });
       }
@@ -239,6 +256,7 @@ router.patch(
 
       const request = await prisma.payoutRequest.findUnique({ where: { id } });
       if (!request) return res.status(404).json({ success: false, message: 'Payout request not found' });
+      await assertPayoutAccess(request, req);
       if (request.status !== 'PENDING') {
         return res.status(400).json({ success: false, message: `Request is already ${request.status}` });
       }
@@ -270,6 +288,7 @@ router.patch(
       const { id } = req.params;
       const request = await prisma.payoutRequest.findUnique({ where: { id } });
       if (!request) return res.status(404).json({ success: false, message: 'Payout request not found' });
+      await assertPayoutAccess(request, req);
       if (request.status !== 'APPROVED') {
         return res.status(400).json({ success: false, message: 'Only APPROVED requests can be marked as paid' });
       }

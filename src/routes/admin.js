@@ -124,32 +124,39 @@ router.get('/stats/summary', authenticate, authorize('ADMIN', 'MANAGER'), async 
       return res.status(403).json({ success: false, message: 'No organisation found for this user.' });
     }
 
-    // All farms belonging to this admin
-    const adminFarms = await prisma.farm.findMany({
-      where: { adminId },
-      select: { id: true },
-    });
-    const farmIds = adminFarms.map((f) => f.id);
-
     const since = periodStart(req.query.period);
     const dateFilter = since ? { gte: since } : undefined;
 
     const sevenDaysAgo = new Date();
     sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
 
-    const orgUserWhere = { managedById: adminId };
+    // ── Per-company scoping — the dashboard must never show another
+    //    company's data (admin-isolation audit). Farm-less records are
+    //    matched through the recorded/created user instead of `farmId: null`.
     const wasteWhere = {
-      ...(farmIds.length > 0 ? { farmId: { in: farmIds } } : { farmId: null }),
+      OR: [
+        { farm: { adminId } },
+        { recordedBy: { managedById: adminId } },
+      ],
       ...(dateFilter ? { date: dateFilter } : {}),
     };
     const processWhere = {
-      ...(farmIds.length > 0 ? { farmId: { in: farmIds } } : {}),
+      OR: [
+        { farm: { adminId } },
+        { createdBy: { managedById: adminId } },
+      ],
       ...(dateFilter ? { startDate: dateFilter } : {}),
     };
     const orderWhere = {
       status: 'COMPLETED',
+      OR: [
+        { items: { some: { variant: { product: { farm: { adminId } } } } } },
+        { items: { some: { variant: { product: { createdBy: { managedById: adminId } } } } } },
+        { createdById: req.user.id },
+      ],
       ...(dateFilter ? { createdAt: dateFilter } : {}),
     };
+    const orgUserWhere = { managedById: adminId };
     const orgUserCreatedWhere = {
       ...orgUserWhere,
       ...(dateFilter ? { createdAt: dateFilter } : {}),
@@ -158,6 +165,12 @@ router.get('/stats/summary', authenticate, authorize('ADMIN', 'MANAGER'), async 
       user: { managedById: adminId },
       ...(dateFilter ? { createdAt: dateFilter } : {}),
     };
+
+    // Monthly trends — aggregated in JS from company-scoped rows (the old raw
+    // SQL only covered farm-linked records and missed farm-less lifecycle data).
+    const sixMonthsAgo = new Date();
+    sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
+    const monthKey = (d) => d.toISOString().slice(0, 7);
 
     const [
       usersByRole,
@@ -194,26 +207,14 @@ router.get('/stats/summary', authenticate, authorize('ADMIN', 'MANAGER'), async 
       prisma.processingBatch.count({ where: processWhere }),
       prisma.order.count({ where: orderWhere }),
       prisma.order.aggregate({ where: orderWhere, _sum: { total: true } }),
-      farmIds.length > 0
-        ? prisma.$queryRaw`
-            SELECT DATE_TRUNC('month', date) as month, SUM(quantity)::float8 as total
-            FROM "WasteRecord"
-            WHERE "farmId" = ANY(${farmIds}::text[])
-              AND date >= NOW() - INTERVAL '6 months'
-            GROUP BY DATE_TRUNC('month', date)
-            ORDER BY month DESC`
-        : Promise.resolve([]),
-      farmIds.length > 0
-        ? prisma.$queryRaw`
-            SELECT DATE_TRUNC('month', "startDate") as month,
-              SUM("larvaeOutput")::float8 as larvae,
-              SUM("fertilizerOutput")::float8 as fertilizer
-            FROM "ProcessingBatch"
-            WHERE "farmId" = ANY(${farmIds}::text[])
-              AND "startDate" >= NOW() - INTERVAL '6 months'
-            GROUP BY DATE_TRUNC('month', "startDate")
-            ORDER BY month DESC`
-        : Promise.resolve([]),
+      prisma.wasteRecord.findMany({
+        where: { OR: wasteWhere.OR, date: { gte: sixMonthsAgo } },
+        select: { date: true, quantity: true },
+      }),
+      prisma.processingBatch.findMany({
+        where: { OR: processWhere.OR, startDate: { gte: sixMonthsAgo } },
+        select: { startDate: true, larvaeOutput: true, fertilizerOutput: true },
+      }),
       Promise.all([
         prisma.supportTicket.count({ where: { ...supportWhere, status: 'OPEN' } }),
         prisma.supportTicket.count({ where: { ...supportWhere, status: 'IN_PROGRESS' } }),
@@ -223,12 +224,32 @@ router.get('/stats/summary', authenticate, authorize('ADMIN', 'MANAGER'), async 
     ]);
 
     const byRole = Object.fromEntries(usersByRole.map(({ role, count }) => [role, count]));
-    const monthlyWasteTrend = monthlyWasteRaw.map((r) => ({ month: r.month, total: Number(r.total) }));
-    const monthlyProcessingTrend = processingMonthlyRaw.map((r) => ({
-      month: r.month,
-      larvae: Number(r.larvae ?? 0),
-      fertilizer: Number(r.fertilizer ?? 0),
-    }));
+
+    const wasteMap = new Map();
+    for (const r of monthlyWasteRaw) {
+      const key = monthKey(r.date);
+      const entry = wasteMap.get(key) || { month: key, total: 0 };
+      entry.total += r.quantity || 0;
+      wasteMap.set(key, entry);
+    }
+    const monthlyWasteTrend = Array.from(wasteMap.values())
+      .sort((a, b) => b.month.localeCompare(a.month))
+      .slice(0, 6)
+      .map((e) => ({ ...e, total: +e.total.toFixed(2) }));
+
+    const procMap = new Map();
+    for (const r of processingMonthlyRaw) {
+      const key = monthKey(r.startDate);
+      const entry = procMap.get(key) || { month: key, larvae: 0, fertilizer: 0 };
+      entry.larvae += r.larvaeOutput || 0;
+      entry.fertilizer += r.fertilizerOutput || 0;
+      procMap.set(key, entry);
+    }
+    const monthlyProcessingTrend = Array.from(procMap.values())
+      .sort((a, b) => b.month.localeCompare(a.month))
+      .slice(0, 6)
+      .map((e) => ({ ...e, larvae: +e.larvae.toFixed(2), fertilizer: +e.fertilizer.toFixed(2) }));
+
     const [ticketOpen, ticketInProgress, ticketResolved, ticketClosed] = supportCounts;
 
     res.json({
@@ -474,8 +495,20 @@ router.get('/audit-logs', authenticate, authorize('SUPER_ADMIN', 'ADMIN'), async
   try {
     const limit = Math.min(parseInt(req.query.limit ?? '100'), 200);
 
+    // SUPER_ADMIN sees everything; ADMIN only sees their own company's events.
+    const adminId = req.user.role === 'ADMIN' ? req.user.adminId : null;
+    const wasteWhere = adminId
+      ? { OR: [{ farm: { adminId } }, { recordedBy: { managedById: adminId } }] }
+      : {};
+    const userWhere = adminId ? { managedById: adminId } : {};
+    const batchWhere = adminId
+      ? { OR: [{ farm: { adminId } }, { createdBy: { managedById: adminId } }] }
+      : {};
+    const cageWhere = adminId ? { createdBy: { managedById: adminId } } : {};
+
     const [wasteEvents, userEvents, batchEvents, cageEvents] = await Promise.all([
       prisma.wasteRecord.findMany({
+        where: wasteWhere,
         take: limit,
         orderBy: { createdAt: 'desc' },
         select: {
@@ -490,11 +523,13 @@ router.get('/audit-logs', authenticate, authorize('SUPER_ADMIN', 'ADMIN'), async
         },
       }),
       prisma.user.findMany({
+        where: userWhere,
         take: limit,
         orderBy: { createdAt: 'desc' },
         select: { id: true, fullName: true, email: true, role: true, createdAt: true },
       }),
       prisma.processingBatch.findMany({
+        where: batchWhere,
         take: limit,
         orderBy: { createdAt: 'desc' },
         select: {
@@ -508,6 +543,7 @@ router.get('/audit-logs', authenticate, authorize('SUPER_ADMIN', 'ADMIN'), async
         },
       }),
       prisma.cage.findMany({
+        where: cageWhere,
         take: limit,
         orderBy: { createdAt: 'desc' },
         select: {
@@ -794,7 +830,20 @@ router.get('/payout-minimum-points', authenticate, authorize('ADMIN', 'MANAGER',
 
     // Return active products with their variants so admin can cross-reference prices
     const products = await prisma.product.findMany({
-      where: { status: 'ACTIVE', deletedAt: null },
+      where: {
+        status: 'ACTIVE',
+        deletedAt: null,
+        // ADMIN/MANAGER only see their own company's products
+        ...(req.user.adminId
+          ? {
+              OR: [
+                { farm: { adminId: req.user.adminId } },
+                { createdBy: { managedById: req.user.adminId } },
+                { createdById: req.user.id },
+              ],
+            }
+          : {}),
+      },
       select: {
         id: true,
         name: true,
@@ -847,6 +896,31 @@ router.put('/product-variants/:id/points-cost', authenticate, authorize('ADMIN',
   if (!errors.isEmpty()) return res.status(400).json({ success: false, errors: errors.array() });
   try {
     const { id } = req.params;
+    // ADMIN may only edit a variant that belongs to their own company's product.
+    if (req.user.role === 'ADMIN' && req.user.adminId) {
+      const variant = await prisma.productVariant.findUnique({
+        where: { id },
+        select: {
+          id: true,
+          product: {
+            select: {
+              farmId: true,
+              createdById: true,
+              createdBy: { select: { managedById: true } },
+            },
+          },
+        },
+      });
+      const product = variant?.product;
+      const owns =
+        product &&
+        (product.farmId
+          ? false
+          : (product.createdBy?.managedById === req.user.adminId || product.createdById === req.user.id));
+      if (!variant || !owns) {
+        return res.status(404).json({ success: false, message: 'Variant not found' });
+      }
+    }
     const pointsCost = req.body.pointsCost === null || req.body.pointsCost === undefined ? null : Number(req.body.pointsCost);
     const variant = await prisma.productVariant.update({
       where: { id },
@@ -862,11 +936,14 @@ router.put('/product-variants/:id/points-cost', authenticate, authorize('ADMIN',
 
 // ─── Company Vehicle Fleet ────────────────────────────────────────────────────
 
-// List all vehicles
+// List all vehicles (scoped to the requesting company for ADMIN/MANAGER)
 router.get('/vehicles', authenticate, authorize('ADMIN', 'MANAGER', 'SUPER_ADMIN'), async (req, res, next) => {
   try {
     const { activeOnly } = req.query;
-    const where = activeOnly === 'true' ? { isActive: true } : {};
+    const where = {
+      ...(activeOnly === 'true' ? { isActive: true } : {}),
+      ...(req.user.adminId ? { adminId: req.user.adminId } : {}),
+    };
     const vehicles = await prisma.vehicle.findMany({
       where,
       orderBy: { createdAt: 'desc' },
@@ -889,7 +966,13 @@ router.post('/vehicles', authenticate, authorize('ADMIN', 'SUPER_ADMIN'), [
   try {
     const { plateNumber, type, model, color } = req.body;
     const vehicle = await prisma.vehicle.create({
-      data: { plateNumber: plateNumber.toUpperCase(), type, model, color },
+      data: {
+        plateNumber: plateNumber.toUpperCase(),
+        type,
+        model,
+        color,
+        adminId: req.user.adminId ?? null,
+      },
     });
     res.status(201).json({ success: true, message: 'Vehicle added successfully', data: { vehicle } });
   } catch (error) {
@@ -912,6 +995,14 @@ router.put('/vehicles/:id', authenticate, authorize('ADMIN', 'SUPER_ADMIN'), [
   if (!errors.isEmpty()) return res.status(400).json({ success: false, errors: errors.array() });
   try {
     const { id } = req.params;
+    // ADMIN may only update vehicles that belong to their own company.
+    if (req.user.role === 'ADMIN' && req.user.adminId) {
+      const existing = await prisma.vehicle.findFirst({
+        where: { id, adminId: req.user.adminId },
+        select: { id: true },
+      });
+      if (!existing) return res.status(404).json({ success: false, message: 'Vehicle not found' });
+    }
     const { plateNumber, type, model, color, isActive } = req.body;
     const data = {};
     if (plateNumber != null) data.plateNumber = plateNumber.toUpperCase();
@@ -932,6 +1023,14 @@ router.put('/vehicles/:id', authenticate, authorize('ADMIN', 'SUPER_ADMIN'), [
 router.delete('/vehicles/:id', authenticate, authorize('ADMIN', 'SUPER_ADMIN'), async (req, res, next) => {
   try {
     const { id } = req.params;
+    // ADMIN may only deactivate vehicles that belong to their own company.
+    if (req.user.role === 'ADMIN' && req.user.adminId) {
+      const existing = await prisma.vehicle.findFirst({
+        where: { id, adminId: req.user.adminId },
+        select: { id: true },
+      });
+      if (!existing) return res.status(404).json({ success: false, message: 'Vehicle not found' });
+    }
     // Soft-delete: mark inactive rather than hard delete
     await prisma.vehicle.update({ where: { id }, data: { isActive: false } });
     res.json({ success: true, message: 'Vehicle deactivated' });
@@ -1655,7 +1754,7 @@ router.get('/users/onboarding-trend', authenticate, authorize('SUPER_ADMIN', 'AD
           DATE_TRUNC('month', "createdAt") as month,
           role,
           COUNT(*)::int as count
-        FROM "User"
+        FROM "Users"
         WHERE "createdAt" >= NOW() - INTERVAL '12 months'
         GROUP BY DATE_TRUNC('month', "createdAt"), role
         ORDER BY month ASC
@@ -1666,7 +1765,7 @@ router.get('/users/onboarding-trend', authenticate, authorize('SUPER_ADMIN', 'AD
           DATE_TRUNC('month', "createdAt") as month,
           role,
           COUNT(*)::int as count
-        FROM "User"
+        FROM "Users"
         WHERE "managedById" = ${adminId}
           AND "createdAt" >= NOW() - INTERVAL '12 months'
         GROUP BY DATE_TRUNC('month', "createdAt"), role
