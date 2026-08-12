@@ -358,11 +358,21 @@ router.delete('/:id', authenticate, authorize('ADMIN'), async (req, res, next) =
     const { id } = req.params;
     
     const wasteRecord = await prisma.wasteRecord.findUnique({
-      where: { id }
+      where: { id },
+      include: { processingBatch: { include: { _count: { select: { cages: true } } } } },
     });
-    
+
     if (!wasteRecord) {
       throw new AppError('Waste record not found', 404);
+    }
+
+    // Guard: waste that belongs to a batch already used to feed larvae
+    // cannot be deleted (it would corrupt the feeding records).
+    if (wasteRecord.processingBatch && wasteRecord.processingBatch._count.cages > 0) {
+      throw new AppError(
+        'This waste record is part of a batch already used to feed larvae and cannot be deleted.',
+        409,
+      );
     }
     
     await assertWasteAccess(id, req);

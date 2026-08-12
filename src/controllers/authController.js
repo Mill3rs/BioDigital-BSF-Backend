@@ -157,7 +157,7 @@ class AuthController {
       const isEmail = loginIdentifier.includes("@");
 
       const user = await prisma.user.findFirst({
-        where: isEmail ? { email: loginIdentifier } : { phoneNumber: loginIdentifier },
+        where: isEmail ? { email: { equals: loginIdentifier, mode: 'insensitive' } } : { phoneNumber: loginIdentifier },
         include: {
           farm: true,
           driverProfile: true,

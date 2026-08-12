@@ -152,7 +152,7 @@ router.get('/batches', authenticate, async (req, res, next) => {
           createdBy: { select: { id: true, fullName: true } },
           wasteRecords: { take: 5 },
           activityLogs: { take: 10, orderBy: { timestamp: 'desc' } },
-          _count: { select: { wasteRecords: true, activityLogs: true } }
+          _count: { select: { wasteRecords: true, activityLogs: true, cages: true } }
         },
         skip,
         take: parseInt(limit),
@@ -491,6 +491,85 @@ router.post('/batches/:id/add-waste', authenticate, authorize('MANAGER', 'ADMIN'
     });
 
     res.json({ success: true, data: updatedBatch });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Return waste records from a batch back to the available pool.
+// Only allowed while the batch has NOT been used to feed larvae
+// (i.e. no cages are assigned to the batch).
+router.post('/batches/:id/remove-waste', authenticate, authorize('MANAGER', 'ADMIN'), [
+  body('wasteRecordIds').isArray().withMessage('wasteRecordIds must be an array')
+], async (req, res, next) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return res.status(400).json({ success: false, errors: errors.array() });
+  }
+
+  try {
+    const { id } = req.params;
+    const { wasteRecordIds } = req.body;
+    const uniqueIds = [...new Set(wasteRecordIds)];
+
+    if (uniqueIds.length === 0) {
+      return res.status(400).json({ success: false, message: 'Select at least one waste record to return.' });
+    }
+
+    // Batches in a closed state cannot be modified.
+    await assertBatchIsActive(id);
+
+    const batch = await prisma.processingBatch.findUnique({
+      where: { id },
+      include: { _count: { select: { cages: true } } },
+    });
+    if (!batch) {
+      throw new AppError('Batch not found', 404);
+    }
+
+    // Used-to-feed guard: once cages are assigned (waste fed to larvae),
+    // the waste can no longer be returned.
+    if (batch._count.cages > 0) {
+      throw new AppError(
+        'This batch has already been used to feed larvae and its waste cannot be returned.',
+        409,
+      );
+    }
+
+    const records = await prisma.wasteRecord.findMany({
+      where: { id: { in: uniqueIds }, processingBatchId: id },
+      select: { id: true },
+    });
+    if (records.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'None of the selected waste records belong to this batch.',
+      });
+    }
+
+    const returnIds = records.map((r) => r.id);
+
+    await prisma.$transaction([
+      prisma.processingBatch.update({
+        where: { id },
+        data: { wasteRecords: { disconnect: returnIds.map((wasteId) => ({ id: wasteId })) } },
+      }),
+      prisma.wasteRecord.updateMany({
+        where: { id: { in: returnIds } },
+        data: {
+          processingBatchId: null,
+          processedQuantity: 0,
+          status: 'ACKNOWLEDGED',
+          processingDate: null,
+        },
+      }),
+    ]);
+
+    res.json({
+      success: true,
+      message: `${returnIds.length} waste record(s) returned to available waste.`,
+      data: { returned: returnIds.length },
+    });
   } catch (error) {
     next(error);
   }
@@ -1157,6 +1236,21 @@ router.patch(
 // Delete batch
 router.delete('/batches/:id', authenticate, authorize('ADMIN'), async (req, res, next) => {
   try {
+    const batch = await prisma.processingBatch.findUnique({
+      where: { id: req.params.id },
+      include: { _count: { select: { cages: true } } },
+    });
+    if (!batch) {
+      throw new AppError('Batch not found', 404);
+    }
+    // A batch that has been used to feed larvae (has cages assigned)
+    // cannot be deleted — deleting it would orphan the larvae feeding data.
+    if (batch._count.cages > 0) {
+      throw new AppError(
+        'This batch has been used to feed larvae and cannot be deleted.',
+        409,
+      );
+    }
     await prisma.processingBatch.delete({ where: { id: req.params.id } });
     res.json({ success: true, message: 'Batch deleted successfully' });
   } catch (error) {
