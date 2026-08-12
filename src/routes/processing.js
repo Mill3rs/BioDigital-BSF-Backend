@@ -1251,7 +1251,17 @@ router.delete('/batches/:id', authenticate, authorize('ADMIN'), async (req, res,
         409,
       );
     }
-    await prisma.processingBatch.delete({ where: { id: req.params.id } });
+    // Delete dependent records first — ActivityLog, TeamAssignment and
+    // QualityCheck have required batchId FKs with no onDelete cascade, so
+    // a bare processingBatch.delete() always fails with a foreign-key error.
+    // (WasteRecord & Cage FKs are optional → auto SetNull, and cages are
+    // already excluded by the guard above.)
+    await prisma.$transaction([
+      prisma.activityLog.deleteMany({ where: { batchId: req.params.id } }),
+      prisma.teamAssignment.deleteMany({ where: { batchId: req.params.id } }),
+      prisma.qualityCheck.deleteMany({ where: { batchId: req.params.id } }),
+      prisma.processingBatch.delete({ where: { id: req.params.id } }),
+    ]);
     res.json({ success: true, message: 'Batch deleted successfully' });
   } catch (error) {
     next(error);
