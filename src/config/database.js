@@ -10,6 +10,13 @@ const dbConfig = {
   connectionTimeoutMillis: config.DATABASE_CONNECTION_TIMEOUT
 };
 
+// Hostinger's hPanel env UI stores percent-escapes as \%-escapes in the
+// injected process environment (e.g. Okumkom\\%40\\%402025). Normalize them
+// back so the database URL password parses correctly.
+if (dbConfig.url) {
+  dbConfig.url = dbConfig.url.replace(/\\%/g, '%');
+}
+
 // Resolve Supabase connection: extract project ref and use IPv4 pooler
 const buildPoolerUrl = (originalUrl) => {
   if (!originalUrl) return originalUrl;
