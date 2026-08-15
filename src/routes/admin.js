@@ -1382,8 +1382,8 @@ router.get('/users', authenticate, authorize('SUPER_ADMIN', 'ADMIN', 'MANAGER'),
           createdAt: true,
           lastLogin: true,
           managedById: true,
-          managedBy: {
-            select: { id: true, fullName: true, email: true }
+          adminManaged: {
+            select: { id: true, companyName: true, email: true }
           },
           supplierProfile: true,
           driverProfile: true,
