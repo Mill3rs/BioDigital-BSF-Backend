@@ -413,10 +413,14 @@ router.post('/batches/:id/add-waste', authenticate, authorize('MANAGER', 'ADMIN'
     // Deduplicate — the same record must not be added to a batch twice
     const uniqueIds = [...new Set(wasteRecordIds)];
 
-    // Fetch current waste records to calculate remaining quantities
+    // Fetch current waste records to calculate remaining quantities.
+    // FIFO: order by waste date (oldest first) so the batch quantity is
+    // deducted from the earliest waste records first; createdAt breaks ties
+    // deterministically for records logged on the same day.
     const wasteRecords = await prisma.wasteRecord.findMany({
       where: { id: { in: uniqueIds } },
-      select: { id: true, sourceName: true, quantity: true, unit: true, processedQuantity: true, processingBatchId: true, status: true }
+      select: { id: true, sourceName: true, quantity: true, unit: true, processedQuantity: true, processingBatchId: true, status: true },
+      orderBy: [{ date: 'asc' }, { createdAt: 'asc' }],
     });
 
     if (wasteRecords.length !== uniqueIds.length) {
@@ -426,12 +430,18 @@ router.post('/batches/:id/add-waste', authenticate, authorize('MANAGER', 'ADMIN'
       });
     }
 
-    // Reject records already linked to ANOTHER batch — each record belongs to one batch
-    const alreadyBatched = wasteRecords.filter(r => r.processingBatchId && r.processingBatchId !== id);
+    // Reject records already FULLY consumed in another batch. Partially
+    // consumed records keep their leftover quantity in the available pool,
+    // so they may be added to a new batch (their processingBatchId moves
+    // to that batch, and the consumption ledger stays accurate).
+    const alreadyBatched = wasteRecords.filter(
+      r => r.processingBatchId && r.processingBatchId !== id &&
+        (r.processedQuantity ?? 0) >= r.quantity - 1e-9,
+    );
     if (alreadyBatched.length > 0) {
       return res.status(409).json({
         success: false,
-        message: `The following waste records are already linked to another batch: ${alreadyBatched.map(r => `"${r.sourceName}"`).join(', ')}. Each waste record can only be assigned to one batch.`
+        message: `The following waste records are already fully processed in another batch: ${alreadyBatched.map(r => `"${r.sourceName}"`).join(', ')}. Only leftover waste can be re-batched.`
       });
     }
 
@@ -1234,7 +1244,7 @@ router.patch(
 );
 
 // Delete batch
-router.delete('/batches/:id', authenticate, authorize('ADMIN'), async (req, res, next) => {
+router.delete('/batches/:id', authenticate, authorize('ADMIN', 'SUPER_ADMIN'), async (req, res, next) => {
   try {
     const batch = await prisma.processingBatch.findUnique({
       where: { id: req.params.id },
@@ -1256,10 +1266,22 @@ router.delete('/batches/:id', authenticate, authorize('ADMIN'), async (req, res,
     // a bare processingBatch.delete() always fails with a foreign-key error.
     // (WasteRecord & Cage FKs are optional → auto SetNull, and cages are
     // already excluded by the guard above.)
+    // Waste records linked to the deleted batch are also reset so their full
+    // quantity returns to the available-waste pool — deleting a batch is an
+    // undo, not a loss of the batched kg.
     await prisma.$transaction([
       prisma.activityLog.deleteMany({ where: { batchId: req.params.id } }),
       prisma.teamAssignment.deleteMany({ where: { batchId: req.params.id } }),
       prisma.qualityCheck.deleteMany({ where: { batchId: req.params.id } }),
+      prisma.wasteRecord.updateMany({
+        where: { processingBatchId: req.params.id },
+        data: {
+          processingBatchId: null,
+          processedQuantity: 0,
+          status: 'ACKNOWLEDGED',
+          processingDate: null,
+        },
+      }),
       prisma.processingBatch.delete({ where: { id: req.params.id } }),
     ]);
     res.json({ success: true, message: 'Batch deleted successfully' });
