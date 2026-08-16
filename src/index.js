@@ -13,6 +13,7 @@ dotenv.config();
 const { errorHandler } = require('./middleware/errorHandler');
 const logger = require('./utils/logger');
 const { ensureCageTable } = require('./startup');
+const bugMonitor = require('./monitoring/bugmonitor-node');
 
 // Import routes
 const authRoutes = require('./routes/auth');
@@ -56,7 +57,9 @@ app.use(helmet({
 }));
 app.use(compression());
 app.use(cors({
-  origin: process.env.CORS_ORIGINS ? process.env.CORS_ORIGINS.split(',') : '*',
+  origin: process.env.NODE_ENV !== 'production'
+    ? true // dev: reflect any origin (Vite/webpack dev servers work with no config)
+    : (process.env.CORS_ORIGINS ? process.env.CORS_ORIGINS.split(',') : '*'),
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
@@ -64,6 +67,9 @@ app.use(cors({
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 app.use('/uploads', express.static('uploads'));
+
+// ASL Bug Monitor — capture 5xx responses (even those handled inside routes)
+app.use(bugMonitor.responseStatusMonitor());
 
 // Request logging
 app.use((req, res, next) => {
@@ -130,6 +136,13 @@ app.use('/api/payout', payoutRoutes);
 const { initializeSocket } = require('./sockets');
 initializeSocket(server);
 
+// ASL Bug Monitor — capture backend errors on the central dashboard
+bugMonitor.init({
+  endpoint: process.env.BUGMONITOR_URL || 'https://aslbugmonitor.agricconnect.org',
+  app: 'biodigital-bsf-farm',
+  environment: process.env.NODE_ENV || 'production',
+});
+
 // 404 handler
 app.use((req, res) => {
   res.status(404).json({
@@ -139,6 +152,7 @@ app.use((req, res) => {
 });
 
 // Global error handler
+app.use(bugMonitor.expressErrorMiddleware());
 app.use(errorHandler);
 
 const PORT = process.env.PORT || 3000;
