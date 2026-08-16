@@ -366,18 +366,46 @@ router.delete('/:id', authenticate, authorize('ADMIN'), async (req, res, next) =
       throw new AppError('Waste record not found', 404);
     }
 
-    // Guard: waste that belongs to a batch already used to feed larvae
-    // cannot be deleted (it would corrupt the feeding records).
-    if (wasteRecord.processingBatch && wasteRecord.processingBatch._count.cages > 0) {
-      throw new AppError(
-        'This waste record is part of a batch already used to feed larvae and cannot be deleted.',
-        409,
-      );
-    }
-    
     await assertWasteAccess(id, req);
-    
-    await prisma.wasteRecord.delete({ where: { id } });
+
+    let message = 'Waste record deleted successfully';
+
+    if (wasteRecord.processingBatch) {
+      const batch = wasteRecord.processingBatch;
+
+      // Used to feed larvae → the batch is referenced by cage feeding records,
+      // so the waste cannot be removed without corrupting them.
+      if (batch._count.cages > 0) {
+        throw new AppError(
+          'This waste record is in use — it is part of a batch already used to feed larvae and cannot be deleted.',
+          409,
+        );
+      }
+
+      // Deleting a used waste record means removing the entire batch process
+      // from the system: delete dependent records first, return the batch's
+      // other waste to the available pool, then delete the batch and this
+      // waste record.
+      await prisma.$transaction([
+        prisma.activityLog.deleteMany({ where: { batchId: batch.id } }),
+        prisma.teamAssignment.deleteMany({ where: { batchId: batch.id } }),
+        prisma.qualityCheck.deleteMany({ where: { batchId: batch.id } }),
+        prisma.wasteRecord.updateMany({
+          where: { id: { not: id }, processingBatchId: batch.id },
+          data: {
+            processingBatchId: null,
+            processedQuantity: 0,
+            status: 'ACKNOWLEDGED',
+            processingDate: null,
+          },
+        }),
+        prisma.processingBatch.delete({ where: { id: batch.id } }),
+        prisma.wasteRecord.delete({ where: { id } }),
+      ]);
+      message = `Waste record deleted. It was part of processing batch ${batch.batchNumber}, which was removed from the system along with its entire processing history.`;
+    } else {
+      await prisma.wasteRecord.delete({ where: { id } });
+    }
     
     // Update farm total
     if (wasteRecord.farmId) {
@@ -394,7 +422,7 @@ router.delete('/:id', authenticate, authorize('ADMIN'), async (req, res, next) =
       });
     }
     
-    res.json({ success: true, message: 'Waste record deleted successfully' });
+    res.json({ success: true, message });
   } catch (error) {
     next(error);
   }
