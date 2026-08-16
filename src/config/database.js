@@ -45,6 +45,28 @@ if (effectiveUrl !== dbConfig.url) {
   dbConfig.url = effectiveUrl;
 }
 
+// Append connection-safety knobs to the datasource URL. Without these a
+// slow/unreachable database makes Prisma queries hang indefinitely, which
+// surfaces in the browser as axios "timeout of 15000ms exceeded" / Network
+// Error. With them, DB failures return a fast, clear 5xx instead.
+const withUrlParam = (url, key, value) => {
+  if (!url) return url;
+  const separator = url.includes('?') ? '&' : '?';
+  return `${url}${separator}${key}=${value}`;
+};
+
+if (dbConfig.url) {
+  dbConfig.url = withUrlParam(
+    dbConfig.url,
+    'connection_limit',
+    Math.max(Number(dbConfig.connectionLimit) || 20, 1),
+  );
+  // Seconds: wait at most 5s for a pooled connection before erroring
+  dbConfig.url = withUrlParam(dbConfig.url, 'pool_timeout', 5);
+  // Seconds: fail a DB call after 15s instead of hanging the request
+  dbConfig.url = withUrlParam(dbConfig.url, 'socket_timeout', 15);
+}
+
 // Prisma client configuration
 const prismaClientOptions = {
   log: config.NODE_ENV === 'development' 
