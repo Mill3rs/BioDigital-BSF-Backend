@@ -1404,6 +1404,47 @@ router.get('/users', authenticate, authorize('SUPER_ADMIN', 'ADMIN', 'MANAGER'),
   }
 });
 
+// Monthly user onboarding trend grouped by role (last 12 months)
+router.get('/users/onboarding-trend', authenticate, authorize('SUPER_ADMIN', 'ADMIN', 'MANAGER'), async (req, res, next) => {
+  try {
+    const isSuperAdmin = req.user.role === 'SUPER_ADMIN';
+    const adminId = req.user.adminManaged?.id;
+
+    let rows;
+    if (isSuperAdmin) {
+      rows = await prisma.$queryRaw`
+        SELECT
+          DATE_TRUNC('month', "createdAt") as month,
+          role,
+          COUNT(*)::int as count
+        FROM "Users"
+        WHERE "createdAt" >= NOW() - INTERVAL '12 months'
+        GROUP BY DATE_TRUNC('month', "createdAt"), role
+        ORDER BY month ASC
+      `;
+    } else if (adminId) {
+      rows = await prisma.$queryRaw`
+        SELECT
+          DATE_TRUNC('month', "createdAt") as month,
+          role,
+          COUNT(*)::int as count
+        FROM "Users"
+        WHERE "managedById" = ${adminId}
+          AND "createdAt" >= NOW() - INTERVAL '12 months'
+        GROUP BY DATE_TRUNC('month', "createdAt"), role
+        ORDER BY month ASC
+      `;
+    } else {
+      rows = [];
+    }
+
+    const data = rows.map((r) => ({ month: r.month, role: r.role, count: Number(r.count) }));
+    res.json({ success: true, data });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // Get user by ID
 router.get('/users/:id', authenticate, authorize('SUPER_ADMIN', 'ADMIN', 'MANAGER'), async (req, res, next) => {
   try {
@@ -1739,47 +1780,6 @@ router.post('/company-code/generate', authenticate, authorize('ADMIN'), async (r
       message: 'Invite code generated successfully',
       data: { companyName: admin.companyName, inviteCode: admin.inviteCode }
     });
-  } catch (error) {
-    next(error);
-  }
-});
-
-// Monthly user onboarding trend grouped by role (last 12 months)
-router.get('/users/onboarding-trend', authenticate, authorize('SUPER_ADMIN', 'ADMIN', 'MANAGER'), async (req, res, next) => {
-  try {
-    const isSuperAdmin = req.user.role === 'SUPER_ADMIN';
-    const adminId = req.user.adminManaged?.id;
-
-    let rows;
-    if (isSuperAdmin) {
-      rows = await prisma.$queryRaw`
-        SELECT
-          DATE_TRUNC('month', "createdAt") as month,
-          role,
-          COUNT(*)::int as count
-        FROM "Users"
-        WHERE "createdAt" >= NOW() - INTERVAL '12 months'
-        GROUP BY DATE_TRUNC('month', "createdAt"), role
-        ORDER BY month ASC
-      `;
-    } else if (adminId) {
-      rows = await prisma.$queryRaw`
-        SELECT
-          DATE_TRUNC('month', "createdAt") as month,
-          role,
-          COUNT(*)::int as count
-        FROM "Users"
-        WHERE "managedById" = ${adminId}
-          AND "createdAt" >= NOW() - INTERVAL '12 months'
-        GROUP BY DATE_TRUNC('month', "createdAt"), role
-        ORDER BY month ASC
-      `;
-    } else {
-      rows = [];
-    }
-
-    const data = rows.map((r) => ({ month: r.month, role: r.role, count: Number(r.count) }));
-    res.json({ success: true, data });
   } catch (error) {
     next(error);
   }
