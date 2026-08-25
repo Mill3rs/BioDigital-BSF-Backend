@@ -3,6 +3,11 @@ const { body, validationResult } = require('express-validator');
 const { prisma } = require('../config/database');
 const { authenticate, authorize } = require('../middleware/auth');
 const { AppError } = require('../middleware/errorHandler');
+const {
+  extractHarvest,
+  extractOutput,
+  aggregateBagging,
+} = require('../utils/batchOutput');
 
 const router = express.Router();
 
@@ -55,108 +60,8 @@ const PRODUCT_CATEGORY_MAP = {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-/**
- * Extract harvest fractions recorded during Stage 4 advance (most recent wins).
- * Returns null when no stage-4 transition log exists.
- */
-function extractHarvest(activityLogs) {
-  const log = [...activityLogs].find(
-    (l) =>
-      l.action === 'NOTE_ADDED' &&
-      l.metadata?.type === 'STAGE_TRANSITION' &&
-      Number(l.metadata?.stageNumber) === 4,
-  );
-  if (!log) return null;
-  const m = log.metadata;
-  return {
-    harvestBsfLarvae: m.harvestBsfLarvae ?? null,
-    harvestFrass:     m.harvestFrass     ?? null,
-    harvestPrepupae:  m.harvestPrepupae  ?? null,
-    harvestRecycled:  m.harvestRecycled  ?? null,
-    harvestTotalKg:   m.harvestTotalKg   ?? null,
-    stageWeight:      m.stageWeight      ?? null,
-  };
-}
-
-/**
- * Extract output breakdown from the End Batch (OUTPUT_RECORDED) log, or fall
- * back to a SEGREGATION_OUTPUT recorded directly in the post-processing page.
- */
-function extractOutput(activityLogs) {
-  // Use the OUTPUT_RECORDED log only if it contains a product breakdown.
-  // The "Record Output" action stores only { fertilizerOutput, qualityScore } (no product fields),
-  // while the "End Batch" action stores the full product map. Skip the former.
-  const formal = [...activityLogs].find((l) => {
-    if (l.action !== 'OUTPUT_RECORDED') return false;
-    const m = l.metadata ?? {};
-    return (
-      m.bsfLarvaeKg != null ||
-      m.bsfMealKg != null ||
-      m.bsfOilKg != null ||
-      m.frassFertilizerKg != null ||
-      m.recycledLarvaeKg != null ||
-      m.prepupaeWeight != null
-    );
-  });
-  if (formal) {
-    const m = formal.metadata ?? {};
-    return {
-      bsfLarvaeKg:       m.bsfLarvaeKg       ?? null,
-      bsfMealKg:         m.bsfMealKg         ?? null,
-      bsfOilKg:          m.bsfOilKg          ?? null,
-      frassFertilizerKg: m.frassFertilizerKg ?? null,
-      recycledLarvaeKg:  m.recycledLarvaeKg  ?? null,
-      prepupaeWeight:    m.prepupaeWeight     ?? null,
-      totalOutputKg:     m.totalOutputKg     ?? null,
-    };
-  }
-
-  // Fall back to the most recent SEGREGATION_OUTPUT recorded in post-processing
-  const seg = [...activityLogs].find(
-    (l) => l.action === 'NOTE_ADDED' && l.metadata?.type === 'SEGREGATION_OUTPUT',
-  );
-  if (!seg) return null;
-  const p = seg.metadata.products ?? {};
-  const total = Object.values(p).reduce((s, v) => s + (Number(v) || 0), 0);
-  return {
-    frassFertilizerKg: p['Frass Fertilizer']        ?? null,
-    prepupaeWeight:    p['Prepupae']                 ?? null,
-    bsfLarvaeKg:       p['BSF Larvae']               ?? null,
-    bsfMealKg:         p['BSF Meal']                 ?? null,
-    bsfOilKg:          p['BSF Oil']                  ?? null,
-    recycledLarvaeKg:  p['Live Larvae (recycled)']   ?? null,
-    totalOutputKg:     total > 0 ? total : null,
-  };
-}
-
-/**
- * Aggregate all BAGGING_RECORD logs for a batch into a map of
- * { product -> { baggedKg, bagCount, records[] } }.
- */
-function aggregateBagging(activityLogs) {
-  const map = {};
-  for (const l of activityLogs) {
-    if (l.action !== 'NOTE_ADDED' || l.metadata?.type !== 'BAGGING_RECORD') continue;
-    const m = l.metadata;
-    const product = m.product;
-    if (!product) continue;
-    if (!map[product]) map[product] = { baggedKg: 0, bagCount: 0, records: [] };
-    map[product].baggedKg  += m.baggedKg  ?? 0;
-    map[product].bagCount  += m.bagCount   ?? 0;
-    map[product].records.push({
-      id:           l.id,
-      baggedKg:     m.baggedKg    ?? 0,
-      bagCount:     m.bagCount    ?? 0,
-      notes:        m.notes       ?? null,
-      costPrice:    m.costPrice   ?? null,
-      sellingPrice: m.sellingPrice ?? null,
-      productId:    m.productId   ?? null,
-      recordedBy:   l.performedBy?.fullName ?? null,
-      recordedAt:   l.timestamp,
-    });
-  }
-  return map;
-}
+// extractHarvest / extractOutput / aggregateBagging live in
+// ../utils/batchOutput so the admin dashboard stats can reuse them.
 
 /**
  * Shape a raw batch + its logs into the post-processing response shape.

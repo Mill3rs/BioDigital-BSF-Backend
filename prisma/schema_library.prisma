@@ -1,6 +1,6 @@
 generator client {
   provider      = "prisma-client-js"
-  engineType    = "binary"
+  engineType    = "library"
   binaryTargets = ["native", "debian-openssl-1.1.x"]
 }
 
@@ -67,7 +67,6 @@ model User {
   payoutRequests    PayoutRequest[]   @relation("SupplierPayouts")
   processedPayouts  PayoutRequest[]   @relation("ProcessedPayouts")
   cages             Cage[]
-  trays             Tray[]
 
   @@map("Users")
 }
@@ -410,10 +409,6 @@ model ProcessingBatch {
   quantity    Float // Input quantity
   status      BatchStatus @default(PENDING)
 
-  // Amount of this batch's waste that has been fed to larvae (Stage 3).
-  // Used to show the true remaining quantity in the Feed Source dropdown.
-  fedQuantity Float? @default(0)
-
   // Processing parameters
   temperature     Float? // Celsius
   materialLevel   Float? // Percentage
@@ -452,7 +447,6 @@ model ProcessingBatch {
   activityLogs    ActivityLog[]
   qualityChecks   QualityCheck[]
   cages           Cage[]
-  trays           Tray[]
 }
 
 // Cage Management (for Breeding & Egg Collection)
@@ -470,23 +464,6 @@ model Cage {
   batch         ProcessingBatch? @relation(fields: [batchId], references: [id])
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
-}
-
-// Tray Management (for Larvae Feeding)
-model Tray {
-  id          String   @id @default(cuid())
-  trayId      String   // User-friendly identifier, e.g. "Tray-L1-A"
-  description String?
-  location    String?
-  capacity    Float?   // Maximum capacity in kg
-  status      String   @default("ACTIVE")
-  notes       String?
-  createdById String
-  createdBy   User     @relation(fields: [createdById], references: [id])
-  batchId     String?
-  batch       ProcessingBatch? @relation(fields: [batchId], references: [id])
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
 }
 
 enum ProcessType {

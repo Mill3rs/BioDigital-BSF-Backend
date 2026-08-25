@@ -5,6 +5,7 @@ const { authenticate, authorize } = require('../middleware/auth');
 const { AppError } = require('../middleware/errorHandler');
 const bcrypt = require('bcryptjs');
 const logger = require('../utils/logger');
+const { summarizeBatchOutputs } = require('../utils/batchOutput');
 
 const router = express.Router();
 
@@ -31,6 +32,10 @@ router.get('/stats', authenticate, authorize('SUPER_ADMIN'), async (req, res, ne
     const userWhere    = dateFilter ? { createdAt: dateFilter } : {};
     const processWhere = dateFilter ? { startDate: dateFilter } : {};
 
+    // Lifecycle stats only count lifecycle batches (LC- prefix) — matching the
+    // Lifecycle list on the Processing page. Waste batches (WB-) are excluded.
+    const lifecycleWhere = { ...processWhere, batchNumber: { startsWith: 'LC-' } };
+
     const [
       totalUsers,
       totalFarms,
@@ -41,6 +46,10 @@ router.get('/stats', authenticate, authorize('SUPER_ADMIN'), async (req, res, ne
       activeAdmins,
       systemHealth,
       supportCounts,
+      lifecycleInProgress,
+      lifecycleCompleted,
+      wasteProcessedAgg,
+      wasteCollectedAgg,
     ] = await Promise.all([
       prisma.user.count({ where: userWhere }),
       prisma.farm.count(),
@@ -56,6 +65,16 @@ router.get('/stats', authenticate, authorize('SUPER_ADMIN'), async (req, res, ne
         prisma.supportTicket.count({ where: { status: 'RESOLVED',    ...(dateFilter ? { createdAt: dateFilter } : {}) } }),
         prisma.supportTicket.count({ where: { status: 'CLOSED',      ...(dateFilter ? { createdAt: dateFilter } : {}) } }),
       ]),
+      prisma.processingBatch.count({ where: { ...lifecycleWhere, status: { in: ['PLANNED', 'PENDING', 'ACTIVE', 'PAUSED'] } } }),
+      prisma.processingBatch.count({ where: { ...lifecycleWhere, status: 'COMPLETED' } }),
+      prisma.wasteRecord.aggregate({
+        where: { ...wasteWhere, status: 'PROCESSED' },
+        _sum: { quantity: true },
+      }),
+      prisma.wasteRecord.aggregate({
+        where: { ...wasteWhere, status: { in: ['COLLECTED', 'PROCESSING', 'PROCESSED', 'ACKNOWLEDGED'] } },
+        _sum: { quantity: true },
+      }),
     ]);
     
     // Get daily active users (last 7 days)
@@ -88,6 +107,20 @@ router.get('/stats', authenticate, authorize('SUPER_ADMIN'), async (req, res, ne
       _sum: { quantity: true, carbonSaved: true },
     });
 
+    // Larvae / frass totals derived from recorded activity logs (the
+    // larvaeOutput / fertilizerOutput batch columns are rarely populated).
+    const completedBatches = await prisma.processingBatch.findMany({
+      where: { ...processWhere, status: 'COMPLETED' },
+      select: {
+        activityLogs: {
+          where: { action: 'NOTE_ADDED' },
+          orderBy: { timestamp: 'desc' },
+          take: 100,
+        },
+      },
+    });
+    const batchOutputs = summarizeBatchOutputs(completedBatches);
+
     const [ticketOpen, ticketInProgress, ticketResolved, ticketClosed] = supportCounts;
     
     res.json({
@@ -99,12 +132,19 @@ router.get('/stats', authenticate, authorize('SUPER_ADMIN'), async (req, res, ne
           totalRecords: totalWasteRecords,
           totalWaste: wasteAgg._sum.quantity || 0,
           totalCarbonSaved: wasteAgg._sum.carbonSaved || 0,
+          totalWasteProcessed: wasteProcessedAgg._sum.quantity || 0,
+          totalWasteCollected: wasteCollectedAgg._sum.quantity || 0,
           monthlyTrend: wasteTrend,
         },
         processing: {
           totalBatches: totalProcessingBatches,
           totalLarvaeOutput: processingOutputs._sum.larvaeOutput || 0,
           totalFertilizerOutput: processingOutputs._sum.fertilizerOutput || 0,
+          outputs: batchOutputs,
+        },
+        lifecycle: {
+          inProgress: lifecycleInProgress,
+          completed: lifecycleCompleted,
         },
         sales: { totalOrders, totalRevenue: totalRevenue._sum.total || 0 },
         support: { open: ticketOpen, inProgress: ticketInProgress, resolved: ticketResolved, closed: ticketClosed, total: ticketOpen + ticketInProgress + ticketResolved + ticketClosed },
@@ -147,6 +187,10 @@ router.get('/stats/summary', authenticate, authorize('ADMIN', 'MANAGER'), async 
       ],
       ...(dateFilter ? { startDate: dateFilter } : {}),
     };
+
+    // Lifecycle stats only count lifecycle batches (LC- prefix) — matching the
+    // Lifecycle list on the Processing page. Waste batches (WB-) are excluded.
+    const lifecycleWhere = { ...processWhere, batchNumber: { startsWith: 'LC-' } };
     const orderWhere = {
       status: 'COMPLETED',
       OR: [
@@ -184,6 +228,10 @@ router.get('/stats/summary', authenticate, authorize('ADMIN', 'MANAGER'), async 
       monthlyWasteRaw,
       processingMonthlyRaw,
       supportCounts,
+      lifecycleInProgress,
+      lifecycleCompleted,
+      wasteProcessedAgg,
+      wasteCollectedAgg,
     ] = await Promise.all([
       Promise.all(
         ['ADMIN', 'MANAGER', 'DRIVER', 'SUPPLIER', 'BUYER'].map(async (role) => ({
@@ -221,6 +269,16 @@ router.get('/stats/summary', authenticate, authorize('ADMIN', 'MANAGER'), async 
         prisma.supportTicket.count({ where: { ...supportWhere, status: 'RESOLVED' } }),
         prisma.supportTicket.count({ where: { ...supportWhere, status: 'CLOSED' } }),
       ]),
+      prisma.processingBatch.count({ where: { ...lifecycleWhere, status: { in: ['PLANNED', 'PENDING', 'ACTIVE', 'PAUSED'] } } }),
+      prisma.processingBatch.count({ where: { ...lifecycleWhere, status: 'COMPLETED' } }),
+      prisma.wasteRecord.aggregate({
+        where: { ...wasteWhere, status: 'PROCESSED' },
+        _sum: { quantity: true },
+      }),
+      prisma.wasteRecord.aggregate({
+        where: { ...wasteWhere, status: { in: ['COLLECTED', 'PROCESSING', 'PROCESSED', 'ACKNOWLEDGED'] } },
+        _sum: { quantity: true },
+      }),
     ]);
 
     const byRole = Object.fromEntries(usersByRole.map(({ role, count }) => [role, count]));
@@ -250,6 +308,20 @@ router.get('/stats/summary', authenticate, authorize('ADMIN', 'MANAGER'), async 
       .slice(0, 6)
       .map((e) => ({ ...e, larvae: +e.larvae.toFixed(2), fertilizer: +e.fertilizer.toFixed(2) }));
 
+    // Larvae / frass totals derived from recorded activity logs (the
+    // larvaeOutput / fertilizerOutput batch columns are rarely populated).
+    const completedBatches = await prisma.processingBatch.findMany({
+      where: { ...processWhere, status: 'COMPLETED' },
+      select: {
+        activityLogs: {
+          where: { action: 'NOTE_ADDED' },
+          orderBy: { timestamp: 'desc' },
+          take: 100,
+        },
+      },
+    });
+    const batchOutputs = summarizeBatchOutputs(completedBatches);
+
     const [ticketOpen, ticketInProgress, ticketResolved, ticketClosed] = supportCounts;
 
     res.json({
@@ -260,6 +332,8 @@ router.get('/stats/summary', authenticate, authorize('ADMIN', 'MANAGER'), async 
         waste: {
           totalWaste: wasteAgg._sum.quantity || 0,
           totalCarbonSaved: wasteAgg._sum.carbonSaved || 0,
+          totalWasteProcessed: wasteProcessedAgg._sum.quantity || 0,
+          totalWasteCollected: wasteCollectedAgg._sum.quantity || 0,
           totalRecords: wasteAgg._count,
           monthlyTrend: monthlyWasteTrend,
         },
@@ -267,7 +341,12 @@ router.get('/stats/summary', authenticate, authorize('ADMIN', 'MANAGER'), async 
           totalBatches: processingBatchCount,
           totalLarvaeOutput: processingAgg._sum.larvaeOutput || 0,
           totalFertilizerOutput: processingAgg._sum.fertilizerOutput || 0,
+          outputs: batchOutputs,
           monthlyTrend: monthlyProcessingTrend,
+        },
+        lifecycle: {
+          inProgress: lifecycleInProgress,
+          completed: lifecycleCompleted,
         },
         sales: { totalOrders: orderCount, totalRevenue: orderRevenue._sum.total || 0 },
         support: { open: ticketOpen, inProgress: ticketInProgress, resolved: ticketResolved, closed: ticketClosed, total: ticketOpen + ticketInProgress + ticketResolved + ticketClosed },

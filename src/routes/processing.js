@@ -419,7 +419,26 @@ router.post('/batches/:id/add-waste', authenticate, authorize('MANAGER', 'ADMIN'
     // deterministically for records logged on the same day.
     const wasteRecords = await prisma.wasteRecord.findMany({
       where: { id: { in: uniqueIds } },
-      select: { id: true, sourceName: true, quantity: true, unit: true, processedQuantity: true, processingBatchId: true, status: true },
+      select: {
+        id: true,
+        sourceName: true,
+        sourceType: true,
+        quantity: true,
+        unit: true,
+        date: true,
+        status: true,
+        processedQuantity: true,
+        processingBatchId: true,
+        description: true,
+        location: true,
+        notes: true,
+        images: true,
+        fileUrl: true,
+        recordedById: true,
+        supplierId: true,
+        farmId: true,
+        createdAt: true,
+      },
       orderBy: [{ date: 'asc' }, { createdAt: 'asc' }],
     });
 
@@ -430,22 +449,7 @@ router.post('/batches/:id/add-waste', authenticate, authorize('MANAGER', 'ADMIN'
       });
     }
 
-    // Reject records already FULLY consumed in another batch. Partially
-    // consumed records keep their leftover quantity in the available pool,
-    // so they may be added to a new batch (their processingBatchId moves
-    // to that batch, and the consumption ledger stays accurate).
-    const alreadyBatched = wasteRecords.filter(
-      r => r.processingBatchId && r.processingBatchId !== id &&
-        (r.processedQuantity ?? 0) >= r.quantity - 1e-9,
-    );
-    if (alreadyBatched.length > 0) {
-      return res.status(409).json({
-        success: false,
-        message: `The following waste records are already fully processed in another batch: ${alreadyBatched.map(r => `"${r.sourceName}"`).join(', ')}. Only leftover waste can be re-batched.`
-      });
-    }
-
-    // Reject records that are already fully processed
+    // Reject records that are already fully processed — nothing is left to batch.
     const exhaustedRecords = wasteRecords.filter(r => (r.processedQuantity ?? 0) >= r.quantity - 1e-9);
     if (exhaustedRecords.length > 0) {
       return res.status(409).json({
@@ -454,8 +458,22 @@ router.post('/batches/:id/add-waste', authenticate, authorize('MANAGER', 'ADMIN'
       });
     }
 
+    // A waste record has exactly one processingBatchId (one-to-many), so it
+    // can only ever be linked to ONE batch at a time. Records already claimed
+    // by a different batch contribute only their leftover quantity here: the
+    // leftover is SPLIT into a fresh waste record that gets linked to this
+    // batch, while the original record stays with its current batch so that
+    // batch keeps its source linkage (and its consumed kg stays accurate).
+    const freeRecords = wasteRecords.filter(r => !r.processingBatchId || r.processingBatchId === id);
+    const claimedWithLeftover = wasteRecords.filter(
+      r => r.processingBatchId && r.processingBatchId !== id &&
+        (r.processedQuantity ?? 0) < r.quantity - 1e-9,
+    );
+
     // Validate: batch quantity must not exceed the TOTAL remaining quantity of the selected records
-    const totalRemaining = wasteRecords.reduce((s, r) => s + (r.quantity - (r.processedQuantity ?? 0)), 0);
+    const totalRemaining =
+      freeRecords.reduce((s, r) => s + (r.quantity - (r.processedQuantity ?? 0)), 0) +
+      claimedWithLeftover.reduce((s, r) => s + (r.quantity - (r.processedQuantity ?? 0)), 0);
     if (batchWithQty.quantity > totalRemaining) {
       return res.status(422).json({
         success: false,
@@ -465,11 +483,61 @@ router.post('/batches/:id/add-waste', authenticate, authorize('MANAGER', 'ADMIN'
 
     // Run everything in a transaction
     const updatedBatch = await prisma.$transaction(async (tx) => {
+      // Split the leftover of claimed records into fresh records. The split
+      // record inherits supplier/farm attribution so per-supplier/per-farm
+      // totals stay correct once the original record is shrunk below.
+      const splits = [];
+      for (const r of claimedWithLeftover) {
+        const leftover = r.quantity - (r.processedQuantity ?? 0);
+        const split = await tx.wasteRecord.create({
+          data: {
+            sourceName: r.sourceName,
+            sourceType: r.sourceType,
+            quantity: leftover,
+            unit: r.unit,
+            date: r.date,
+            status: 'ACKNOWLEDGED',
+            description: r.description,
+            location: r.location,
+            notes: r.notes,
+            images: r.images ?? [],
+            fileUrl: r.fileUrl,
+            recordedById: r.recordedById,
+            supplierId: r.supplierId,
+            farmId: r.farmId,
+          },
+        });
+        splits.push(split);
+
+        // The leftover now lives in the split record — shrink the original to
+        // its consumed amount and mark it fully processed, so it stops showing
+        // a phantom remaining quantity in the available pool (quantity and
+        // consumed kg across the two records still add up to the original).
+        await tx.wasteRecord.update({
+          where: { id: r.id },
+          data: {
+            quantity: r.processedQuantity ?? 0,
+            processedQuantity: r.processedQuantity ?? 0,
+            status: 'PROCESSED',
+            ...(r.processingDate ? {} : { processingDate: new Date() }),
+          },
+        });
+      }
+
+      // FIFO over the effective records — split records carry the original
+      // record's date, so oldest waste is still consumed first.
+      const allRecords = [...freeRecords, ...splits].sort((a, b) => {
+        const da = new Date(a.date).getTime();
+        const db = new Date(b.date).getTime();
+        if (da !== db) return da - db;
+        return new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+      });
+
       // Connect waste records to the batch
       const updated = await tx.processingBatch.update({
         where: { id },
         data: {
-          wasteRecords: { connect: uniqueIds.map(wasteId => ({ id: wasteId })) }
+          wasteRecords: { connect: allRecords.map(w => ({ id: w.id })) }
         },
         include: { wasteRecords: true }
       });
@@ -477,7 +545,7 @@ router.post('/batches/:id/add-waste', authenticate, authorize('MANAGER', 'ADMIN'
       // Distribute the batch quantity across the selected records — consume
       // each record's remaining quantity until the batch quantity is filled.
       let toConsume = batchWithQty.quantity;
-      for (const record of wasteRecords) {
+      for (const record of allRecords) {
         if (toConsume <= 0) break;
         const alreadyProcessed = record.processedQuantity ?? 0;
         const remaining = record.quantity - alreadyProcessed;
@@ -941,6 +1009,9 @@ router.post('/batches/:id/advance-stage',
     body('hatchRate').optional({ nullable: true }).isFloat({ min: 0, max: 100 }),
     // Stage 3: Larvae Rearing (Larviculture)
     body('trayId').optional().isString(),
+    body('trayIds').optional().isArray().withMessage('trayIds must be an array'),
+    body('trayAllocations').optional().isArray().withMessage('trayAllocations must be an array'),
+    body('feedBatchId').optional().isString(),
     body('feedAdded').optional({ nullable: true }).isFloat({ min: 0 }),
     body('larvaeCondition').optional().isString(),
     // Stage 4: Harvesting & Separation
@@ -963,7 +1034,7 @@ router.post('/batches/:id/advance-stage',
         // Stage 2
         startDate, temperature, humidity, weightOfHatchedEggs, hatchRate,
         // Stage 3
-        trayId, feedAdded, larvaeCondition,
+        trayId, trayIds, trayAllocations, feedBatchId, feedAdded, larvaeCondition,
         // Stage 4
         larvaeHarvested, frassCollected, residue, qualityGrade,
       } = req.body;
@@ -1007,8 +1078,12 @@ router.post('/batches/:id/advance-stage',
         notes:             notes || null,
       };
 
-      // Stage-specific metadata
-      if (nextNum === 1) {
+      // Build metadata from the form the user just submitted (the stage they are
+      // leaving) so each activity-log entry records what was actually entered.
+      // The entry is titled with the stage being entered — e.g. advancing from
+      // Larvae Rearing creates the "Stage 4 Entry" containing the feed/tray/
+      // temperature/humidity data submitted on that form.
+      if (info.currentStage === 1) {
         stageMeta.cageId = cageId || null;
         stageMeta.timeCollected = timeCollected || null;
         stageMeta.eggClutches = toF(eggClutches);
@@ -1016,25 +1091,15 @@ router.post('/batches/:id/advance-stage',
         stageMeta.condition = condition || null;
       }
 
-      if (nextNum === 2) {
+      if (info.currentStage === 2) {
         // Auto-populate cageId from stage 1 metadata
         const stage1Log = stageLogs.find(l => l.metadata && l.metadata.stageNumber === 1);
-        const prevCageId = stage1Log?.metadata?.cageId || cageId;
-        stageMeta.cageId = prevCageId || null;
+        stageMeta.cageId = stage1Log?.metadata?.cageId || cageId || null;
         stageMeta.startDate = startDate || null;
         stageMeta.temperature = toF(temperature);
         stageMeta.humidity = toF(humidity);
         stageMeta.weightOfHatchedEggs = toF(weightOfHatchedEggs);
         stageMeta.hatchRate = toF(hatchRate);
-      }
-
-      if (nextNum === 3) {
-        stageMeta.batchNumber = batch.batchNumber;
-        stageMeta.trayId = trayId || null;
-        stageMeta.feedAdded = toF(feedAdded);
-        stageMeta.temperature = toF(temperature);
-        stageMeta.humidity = toF(humidity);
-        stageMeta.larvaeCondition = larvaeCondition || null;
 
         // ── Auto-create Larvae Batch ─────────────────────────────────
         // When advancing from Stage 2 (Hatching & Nursery) to Stage 3
@@ -1065,9 +1130,68 @@ router.post('/batches/:id/advance-stage',
         });
       }
 
-      if (nextNum === 4) {
+      if (info.currentStage === 3) {
+        const selectedTrayIds =
+          Array.isArray(trayIds) && trayIds.length > 0
+            ? trayIds.filter((t) => typeof t === 'string' && t)
+            : [];
+
+        // Per-tray allocations: each selected tray gets an LC batch portion
+        // and a feed quantity. The feed total is derived from the allocations
+        // (falling back to the legacy feedAdded field).
+        const allocs = Array.isArray(trayAllocations)
+          ? trayAllocations
+              .filter((a) => a && typeof a.trayId === 'string')
+              .map((a) => ({
+                trayId: a.trayId,
+                lcKg: toF(a.lcKg),
+                feedKg: toF(a.feedKg),
+              }))
+          : [];
+        const allocFeedTotal = allocs.reduce((s, a) => s + (a.feedKg ?? 0), 0);
+        const totalFeed = allocFeedTotal > 0 ? allocFeedTotal : toF(feedAdded);
+
         stageMeta.batchNumber = batch.batchNumber;
-        stageMeta.trayId = trayId || null;
+        // Full tray list + first tray for backward compatibility
+        stageMeta.trayIds = selectedTrayIds.length > 0 ? selectedTrayIds : null;
+        stageMeta.trayId = selectedTrayIds[0] || trayId || null;
+        stageMeta.trayAllocations = allocs.length > 0 ? allocs : null;
+        stageMeta.feedBatchId = feedBatchId || null;
+        stageMeta.feedAdded = totalFeed;
+        stageMeta.temperature = toF(temperature);
+        stageMeta.humidity = toF(humidity);
+        stageMeta.larvaeCondition = larvaeCondition || null;
+
+        // Resolve the Feed Source to its batch number so the activity log
+        // shows "WB-…" instead of the raw record id.
+        if (feedBatchId) {
+          const feedBatch = await prisma.processingBatch.findUnique({
+            where: { id: feedBatchId },
+            select: { batchNumber: true },
+          });
+          stageMeta.feedBatchNumber = feedBatch?.batchNumber || null;
+        }
+
+        // Deduct the fed quantity from the Feed Source (waste batch) so its
+        // remaining quantity reflects what was fed to the larvae.
+        const fed = totalFeed;
+        if (feedBatchId && fed > 0) {
+          await prisma.processingBatch.update({
+            where: { id: feedBatchId },
+            data: { fedQuantity: { increment: fed } },
+          });
+        }
+      }
+
+      if (info.currentStage === 4) {
+        const selectedTrayIds =
+          Array.isArray(trayIds) && trayIds.length > 0
+            ? trayIds.filter((t) => typeof t === 'string' && t)
+            : [];
+        stageMeta.batchNumber = batch.batchNumber;
+        // Full tray list + first tray for backward compatibility
+        stageMeta.trayIds = selectedTrayIds.length > 0 ? selectedTrayIds : null;
+        stageMeta.trayId = selectedTrayIds[0] || trayId || null;
         stageMeta.larvaeHarvested = toF(larvaeHarvested);
         stageMeta.frassCollected = toF(frassCollected);
         stageMeta.residue = toF(residue);

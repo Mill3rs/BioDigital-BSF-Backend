@@ -50,6 +50,23 @@ router.post(
   authController.register,
 );
 
+// Verify the registration OTP entered by the user
+router.post(
+  "/verify-registration-otp",
+  [
+    body("userId").notEmpty().withMessage("User ID is required"),
+    body("code").notEmpty().withMessage("Verification code is required"),
+  ],
+  authController.verifyRegistrationOtp,
+);
+
+// Resend the registration OTP
+router.post(
+  "/resend-registration-otp",
+  [body("userId").notEmpty().withMessage("User ID is required")],
+  authController.resendRegistrationOtp,
+);
+
 // Login
 router.post(
   "/login",

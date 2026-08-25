@@ -7,7 +7,11 @@ class SMSService {
     this.client = null;
     this.fromNumber = config.TWILIO_PHONE_NUMBER;
     
-    if (config.TWILIO_ACCOUNT_SID && config.TWILIO_AUTH_TOKEN) {
+    if (
+      config.TWILIO_ACCOUNT_SID &&
+      config.TWILIO_ACCOUNT_SID.startsWith('AC') &&
+      config.TWILIO_AUTH_TOKEN
+    ) {
       this.client = twilio(config.TWILIO_ACCOUNT_SID, config.TWILIO_AUTH_TOKEN);
       logger.info('SMS service initialized');
     } else {

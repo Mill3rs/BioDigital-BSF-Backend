@@ -95,15 +95,65 @@ function captureMessage(message, opts = {}) {
 function expressErrorMiddleware() {
   // eslint-disable-next-line no-unused-vars
   return (err, req, res, next) => {
-    const status = res.statusCode >= 400 ? res.statusCode : 500;
-    captureError(err, {
-      severity: status >= 500 ? 'critical' : 'high',
-      route: req ? `${req.method} ${req.originalUrl || req.url}` : undefined,
-      errorType: err.name || 'HttpError',
-      description: `HTTP ${status} — ${req ? req.method : ''} ${req ? (req.originalUrl || req.url) : ''}`,
-      tags: ['backend', `status:${status}`],
-    });
+    if (!err) return next();
+    if (!res.locals.__bmReported) {
+      res.locals.__bmReported = true;
+      const status = res.statusCode >= 400 ? res.statusCode : 500;
+      captureError(err, {
+        severity: status >= 500 ? 'critical' : 'high',
+        route: req ? `${req.method} ${req.originalUrl || req.url}` : undefined,
+        errorType: err.name || 'HttpError',
+        description: `HTTP ${status} — ${req ? req.method : ''} ${req ? (req.originalUrl || req.url) : ''}`,
+        tags: ['backend', `status:${status}`],
+      });
+    }
     next(err); // existing handler keeps full control of the response
+  };
+}
+
+/**
+ * Response-status monitor. Catches 5xx responses even when a route handles
+ * its own errors with try/catch and responds directly (bypassing the Express
+ * error middleware). Register BEFORE your routes (wraps res.json/res.send).
+ */
+function responseStatusMonitor() {
+  return (req, res, next) => {
+    const json = res.json.bind(res);
+    const send = res.send.bind(res);
+    const maybeCapture = () => {
+      try {
+        if (res.statusCode >= 500 && !res.locals.__bmReported) {
+          res.locals.__bmReported = true;
+          const body = res.locals.__bmBody;
+          const message =
+            body && typeof body === 'object'
+              ? body.message || body.error || JSON.stringify(body).slice(0, 200)
+              : undefined;
+          captureError(new Error(message || `HTTP ${res.statusCode} response`), {
+            severity: 'critical',
+            route: req ? `${req.method} ${req.originalUrl || req.url}` : undefined,
+            errorType: 'HttpServerError',
+            description: `HTTP ${res.statusCode} — ${req ? req.method : ''} ${req ? (req.originalUrl || req.url) : ''}`,
+            tags: ['backend', `status:${res.statusCode}`],
+          });
+        }
+      } catch {
+        /* never break the app */
+      }
+    };
+    res.json = (body) => {
+      res.locals.__bmBody = body;
+      const result = json(body);
+      maybeCapture();
+      return result;
+    };
+    res.send = (body) => {
+      res.locals.__bmBody = body;
+      const result = send(body);
+      maybeCapture();
+      return result;
+    };
+    next();
   };
 }
 
@@ -116,30 +166,6 @@ function reportProcessCrash(err, kind) {
     errorType: kind,
     tags: ['backend', 'crash', kind.toLowerCase()],
   });
-}
-
-/**
- * Express middleware that reports 5xx responses even when the route handled
- * the error itself (no exception reaches the error middleware). Register with
- * app.use() right after routes; listens on 'finish' so it captures the final
- * status code without changing the response.
- */
-function responseStatusMonitor() {
-  return (req, res, next) => {
-    res.on('finish', () => {
-      const status = res.statusCode;
-      if (status >= 500) {
-        captureError(new Error(`HTTP ${status} ${req.method} ${req.originalUrl || req.url}`), {
-          severity: 'critical',
-          route: `${req.method} ${req.originalUrl || req.url}`,
-          errorType: 'Http5xx',
-          description: `HTTP ${status} — ${req.method} ${req.originalUrl || req.url}`,
-          tags: ['backend', `status:${status}`],
-        });
-      }
-    });
-    next();
-  };
 }
 
 function installProcessHandlers() {

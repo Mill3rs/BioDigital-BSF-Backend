@@ -142,6 +142,48 @@ class EmailService {
     return this.sendEmail(email, 'Reset Your Password', html);
   }
 
+  async sendRegistrationOTP(email, code) {
+    const html = `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <style>
+          body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
+          .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+          .header { background-color: #4CAF50; color: white; padding: 20px; text-align: center; }
+          .content { padding: 20px; background-color: #f9f9f9; }
+          .code-box { background-color: white; border: 2px dashed #4CAF50; border-radius: 8px; padding: 16px; text-align: center; margin: 20px 0; font-size: 28px; font-weight: bold; letter-spacing: 6px; }
+          .footer { text-align: center; padding: 20px; font-size: 12px; color: #666; }
+          .warning { color: #f44336; font-size: 14px; margin-top: 20px; }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="header">
+            <h1>Welcome to BioDigital BSF! 🌿</h1>
+          </div>
+          <div class="content">
+            <p>Hello,</p>
+            <p>Thank you for registering with BioDigital BSF Farm Management System.</p>
+            <p><strong>Your registration verification code:</strong></p>
+            <div class="code-box">${code}</div>
+            <p>Enter this code in the app to complete your registration.</p>
+            <p>This code will expire in 10 minutes.</p>
+            <div class="warning">
+              <p>If you didn't create an account, please ignore this email.</p>
+            </div>
+          </div>
+          <div class="footer">
+            <p>&copy; 2024 BioDigital BSF. All rights reserved.</p>
+          </div>
+        </div>
+      </body>
+      </html>
+    `;
+
+    return this.sendEmail(email, 'Verify Your Registration', html);
+  }
+
   async sendOrderConfirmationEmail(email, order) {
     const html = `
       <!DOCTYPE html>

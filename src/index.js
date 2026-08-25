@@ -12,7 +12,7 @@ dotenv.config();
 // Import middleware
 const { errorHandler } = require('./middleware/errorHandler');
 const logger = require('./utils/logger');
-const { ensureCageTable } = require('./startup');
+const { ensureCageTable, ensureTrayTable, ensureFedQuantityColumn } = require('./startup');
 const bugMonitor = require('./monitoring/bugmonitor-node');
 
 // Import routes
@@ -32,6 +32,7 @@ const adminRoutes = require('./routes/admin');
 const postProcessingRoutes = require('./routes/post-processing');
 const supportRoutes = require('./routes/support');
 const cageRoutes = require('./routes/cages');
+const trayRoutes = require('./routes/trays');
 const payoutRoutes = require('./routes/payout');
 
 const app = express();
@@ -130,6 +131,7 @@ app.use('/api/admin', adminRoutes);
 app.use('/api/post-processing', postProcessingRoutes);
 app.use('/api/support', supportRoutes);
 app.use('/api/cages', cageRoutes);
+app.use('/api/trays', trayRoutes);
 app.use('/api/payout', payoutRoutes);
 
 // WebSocket handlers
@@ -162,6 +164,8 @@ server.listen(PORT, async () => {
   logger.info(`🔗 API URL: http://localhost:${PORT}/api`);
   // Ensure required tables exist
   await ensureCageTable();
+  await ensureTrayTable();
+  await ensureFedQuantityColumn();
 });
 
 server.on('error', (err) => {

@@ -10,9 +10,27 @@ const {
 const { AppError } = require("../middleware/errorHandler");
 const logger = require("../utils/logger");
 const emailService = require("../services/emailService");
+const smsService = require("../services/smsService");
 const notificationService = require("../services/notificationService");
 const { OAuth2Client } = require("google-auth-library");
 const appleSigninAuth = require("apple-signin-auth");
+
+// Shape the user object returned to the client (never expose password/hash)
+function pickUserFields(u) {
+  return {
+    id: u.id,
+    email: u.email,
+    fullName: u.fullName,
+    phoneNumber: u.phoneNumber,
+    profileImage: u.profileImage,
+    role: u.role,
+    status: u.status,
+    onboardingStep: u.onboardingStep,
+    emailVerified: u.emailVerified,
+    phoneVerified: u.phoneVerified,
+    location: u.location,
+  };
+}
 
 class AuthController {
   // Register new user
@@ -26,6 +44,7 @@ class AuthController {
         role,
         supplierType,
         organizationName,
+        location,
       } = req.body;
 
       if (!email && !phoneNumber) {
@@ -69,7 +88,7 @@ class AuthController {
           status: role === "DRIVER" ? "PENDING_VERIFICATION" : "ACTIVE",
           onboardingStep:
             role === "SUPPLIER" || role === "DRIVER"
-              ? "PENDING_CODE"
+              ? "PENDING_OTP"
               : "COMPLETE",
         },
         select: {
@@ -101,15 +120,64 @@ class AuthController {
         });
       }
 
+      // Persist the location selected during registration on the role profile
+      // (same fields as POST /auth/complete-location).
+      if (location) {
+        const locationJson = {
+          address: location.address ?? null,
+          city: location.city ?? null,
+          region: location.region ?? null,
+          country: location.country ?? null,
+          landmark: location.landmark ?? null,
+          lat: location.lat ?? null,
+          lng: location.lng ?? null,
+        };
+        if (role === "SUPPLIER") {
+          await prisma.supplierProfile.update({
+            where: { userId: user.id },
+            data: { collectionAddress: locationJson },
+          });
+        } else if (role === "DRIVER") {
+          await prisma.driverProfile.update({
+            where: { userId: user.id },
+            data: { baseLocation: locationJson },
+          });
+        } else if (role === "BUYER") {
+          await prisma.buyerProfile.update({
+            where: { userId: user.id },
+            data: { deliveryAddress: locationJson },
+          });
+        }
+      }
+
       const token = generateToken(user.id, user.role);
       const refreshToken = generateRefreshToken(user.id);
 
-      // Send verification email
-      emailService
-        .sendVerificationEmail(user.email, token)
-        .catch((err) =>
-          logger.error("Failed to send verification email:", err),
-        );
+      // Driver/Supplier: send a 6-digit OTP by EMAIL (not SMS) instead of a
+      // verification email link. The user enters the code in the app to
+      // complete registration.
+      if (role === "SUPPLIER" || role === "DRIVER") {
+        const otp = String(crypto.randomInt(100000, 1000000));
+        const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+
+        await prisma.user.update({
+          where: { id: user.id },
+          data: { resetPasswordCode: otp, resetPasswordExpires: expiresAt },
+        });
+
+        emailService
+          .sendRegistrationOTP(user.email, otp)
+          .catch((err) =>
+            logger.error("Failed to send registration OTP email:", err),
+          );
+      } else {
+        // Send verification email (link) for other roles
+        emailService
+          .sendVerificationEmail(user.email, token)
+          .catch((err) =>
+            logger.error("Failed to send verification email:", err),
+          );
+      }
 
       // Notify all admins/managers when a new supplier or driver registers
       if (role === "SUPPLIER" || role === "DRIVER") {
@@ -142,6 +210,124 @@ class AuthController {
         message: error.message || 'Registration failed. Please try again.',
         ...(process.env.NODE_ENV === 'development' && error.details ? { details: error.details } : {})
       });
+    }
+  }
+
+  // Verify the registration OTP entered by the user in the app
+  async verifyRegistrationOtp(req, res, next) {
+    try {
+      const { userId, code } = req.body;
+      if (!userId || !code) {
+        throw new AppError("User ID and code are required", 400);
+      }
+
+      const user = await prisma.user.findUnique({ where: { id: userId } });
+      if (!user) {
+        throw new AppError("User not found", 404);
+      }
+
+      // If the account is no longer pending OTP but is already verified, treat
+      // the request as an idempotent success — a stale OTP screen in the app
+      // should proceed instead of erroring.
+      if (user.onboardingStep !== "PENDING_OTP") {
+        if (user.emailVerified) {
+          return res.json({
+            success: true,
+            message: "Registration already verified",
+            data: { user: pickUserFields(user) },
+          });
+        }
+        throw new AppError("Registration is not pending OTP verification", 409);
+      }
+
+      if (!user.resetPasswordCode || String(user.resetPasswordCode) !== String(code).trim()) {
+        throw new AppError("Invalid verification code", 400);
+      }
+
+      if (user.resetPasswordExpires && new Date(user.resetPasswordExpires).getTime() < Date.now()) {
+        throw new AppError("Verification code has expired. Request a new one.", 400);
+      }
+
+      // Code verified — mark the account verified and move to the next step
+      const updatedUser = await prisma.user.update({
+        where: { id: user.id },
+        data: {
+          emailVerified: true,
+          phoneVerified: user.phoneNumber ? true : user.phoneVerified,
+          resetPasswordCode: null,
+          resetPasswordExpires: null,
+          onboardingStep: "PENDING_CODE",
+        },
+        select: {
+          id: true,
+          email: true,
+          fullName: true,
+          phoneNumber: true,
+          profileImage: true,
+          role: true,
+          status: true,
+          onboardingStep: true,
+          emailVerified: true,
+          phoneVerified: true,
+          location: true,
+        },
+      });
+
+      res.json({
+        success: true,
+        message: "Registration verified successfully",
+        data: { user: updatedUser },
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  // Resend the registration OTP by email
+  async resendRegistrationOtp(req, res, next) {
+    try {
+      const { userId } = req.body;
+      if (!userId) {
+        throw new AppError("User ID is required", 400);
+      }
+
+      const user = await prisma.user.findUnique({ where: { id: userId } });
+      if (!user) {
+        throw new AppError("User not found", 404);
+      }
+      if (user.onboardingStep !== "PENDING_OTP") {
+        // Already verified — idempotent success so a stale OTP screen can
+        // proceed (same behavior as verifyRegistrationOtp).
+        if (user.emailVerified) {
+          return res.json({
+            success: true,
+            message: "Account already verified",
+            data: { user: pickUserFields(user) },
+          });
+        }
+        throw new AppError("Registration is not pending OTP verification", 409);
+      }
+
+      const otp = String(crypto.randomInt(100000, 1000000));
+      const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+
+      await prisma.user.update({
+        where: { id: user.id },
+        data: { resetPasswordCode: otp, resetPasswordExpires: expiresAt },
+      });
+
+      emailService
+        .sendRegistrationOTP(user.email, otp)
+        .catch((err) =>
+          logger.error("Failed to resend registration OTP email:", err),
+        );
+
+      res.json({
+        success: true,
+        message: "Verification code resent",
+      });
+    } catch (error) {
+      next(error);
     }
   }
 

@@ -148,6 +148,7 @@ router.get('/', authenticate, async (req, res, next) => {
             },
           },
           driver: { select: { id: true, fullName: true, email: true } },
+          vehicle: { select: { id: true, plateNumber: true, type: true, model: true, color: true } },
           processingBatch: { select: { id: true, batchNumber: true, status: true } }
         },
         orderBy: { date: 'desc' },
@@ -206,6 +207,7 @@ router.get('/:id', authenticate, async (req, res, next) => {
         recordedBy: { select: { id: true, fullName: true, email: true, phoneNumber: true } },
         supplier: { select: { id: true, fullName: true, email: true, phoneNumber: true } },
         driver: { select: { id: true, fullName: true, email: true, phoneNumber: true } },
+        vehicle: { select: { id: true, plateNumber: true, type: true, model: true, color: true } },
         processingBatch: true,
       }
     });
@@ -432,7 +434,7 @@ router.delete('/:id', authenticate, authorize('ADMIN'), async (req, res, next) =
 router.patch('/:id/assign-driver', authenticate, async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { driverId } = req.body;
+    const { driverId, vehicleId } = req.body;
     
     if (!driverId) {
       throw new AppError('Driver ID is required', 400);
@@ -449,10 +451,25 @@ router.patch('/:id/assign-driver', authenticate, async (req, res, next) => {
       select: { id: true },
     });
     if (!driver) throw new AppError('Driver not found or not part of your company', 404);
+
+    // Optional company vehicle for the pickup — validated so drivers never
+    // receive a vehicle from another company.
+    let vehicle = null;
+    if (vehicleId) {
+      vehicle = await prisma.vehicle.findFirst({
+        where: {
+          id: vehicleId,
+          isActive: true,
+          ...(req.user.adminId ? { adminId: req.user.adminId } : {}),
+        },
+        select: { id: true, plateNumber: true, type: true, model: true, color: true },
+      });
+      if (!vehicle) throw new AppError('Vehicle not found or not part of your company', 404);
+    }
     
     const wasteRecord = await prisma.wasteRecord.update({
       where: { id },
-      data: { driverId, status: 'SCHEDULED' },
+      data: { driverId, status: 'SCHEDULED', ...(vehicle ? { vehicleId: vehicle.id } : {}) },
       include: {
         driver: { select: { id: true, fullName: true, email: true, phoneNumber: true } },
         vehicle: { select: { id: true, plateNumber: true, type: true, model: true, color: true } },
@@ -578,7 +595,7 @@ router.get('/summary/stats', authenticate, async (req, res, next) => {
       where.OR = wasteCompanyScopes(req.user.adminId);
     }
     
-    const [stats, bySourceType, byStatus] = await Promise.all([
+    const [stats, bySourceType, byStatus, wasteProcessedAgg, wasteCollectedAgg] = await Promise.all([
       prisma.wasteRecord.aggregate({
         where,
         _sum: { quantity: true, carbonSaved: true },
@@ -596,6 +613,14 @@ router.get('/summary/stats', authenticate, async (req, res, next) => {
         where,
         _count: true
       }),
+      prisma.wasteRecord.aggregate({
+        where: { ...where, status: 'PROCESSED' },
+        _sum: { quantity: true },
+      }),
+      prisma.wasteRecord.aggregate({
+        where: { ...where, status: { in: ['COLLECTED', 'PROCESSING', 'PROCESSED', 'ACKNOWLEDGED'] } },
+        _sum: { quantity: true },
+      }),
     ]);
     
     res.json({
@@ -603,6 +628,8 @@ router.get('/summary/stats', authenticate, async (req, res, next) => {
       data: {
         totalWaste: stats._sum.quantity || 0,
         totalCarbonSaved: stats._sum.carbonSaved || 0,
+        totalWasteProcessed: wasteProcessedAgg._sum.quantity || 0,
+        totalWasteCollected: wasteCollectedAgg._sum.quantity || 0,
         totalRecords: stats._count,
         averageQuantity: stats._avg.quantity || 0,
         bySourceType,
