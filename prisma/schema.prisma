@@ -436,6 +436,12 @@ model ProcessingBatch {
   processingEfficiency Float? // Percentage
   qualityScore         Float? // 0–10 quality rating
   notes  String?
+
+  // Waste classification + handling instructions (set in Waste Batching)
+  wasteType         String? // Waste type key, e.g. FOOD_WASTE, AGRICULTURAL
+  specificWasteItem String? // Waste item key, e.g. banana, cassava — from the waste catalog
+  instructions      String? // Handling / pre-treatment instructions for the batch
+
   images String[]
 
   createdAt   DateTime  @default(now())

@@ -6,23 +6,44 @@ const { AppError } = require('../middleware/errorHandler');
 
 const router = express.Router();
 
+// Waste statuses that count as "delivered" for a driver — mirrors the driver app
+// (DriverDashboardScreen DELIVERED_STATUSES / DeliveriesScreen Delivered tab).
+// Note: only valid WasteStatus enum values — COMPLETED is not a WasteStatus.
+const WASTE_DELIVERED_STATUSES = ['ACKNOWLEDGED', 'PROCESSING', 'PROCESSED'];
+
 // Get driver profile
 router.get('/profile', authenticate, authorize('DRIVER'), async (req, res, next) => {
   try {
-    const profile = await prisma.driverProfile.findUnique({
-      where: { userId: req.user.id },
-      include: {
-        user: {
-          select: { id: true, fullName: true, email: true, phoneNumber: true, profileImage: true }
+    const [profile, orderDeliveries, wasteDelivered] = await Promise.all([
+      prisma.driverProfile.findUnique({
+        where: { userId: req.user.id },
+        include: {
+          user: {
+            select: { id: true, fullName: true, email: true, phoneNumber: true, profileImage: true }
+          }
         }
-      }
-    });
+      }),
+      prisma.order.count({
+        where: { driverId: req.user.id, status: { in: ['DELIVERED', 'COMPLETED'] } }
+      }),
+      prisma.wasteRecord.count({
+        where: { driverId: req.user.id, status: { in: WASTE_DELIVERED_STATUSES }, deletedAt: null }
+      })
+    ]);
     
     if (!profile) {
       throw new AppError('Driver profile not found', 404);
     }
     
-    res.json({ success: true, data: profile });
+    res.json({
+      success: true,
+      data: {
+        ...profile,
+        // Deliveries = order deliveries + waste loads delivered to the plant
+        totalDeliveries: orderDeliveries + wasteDelivered,
+        totalWasteDelivered: wasteDelivered,
+      }
+    });
   } catch (error) {
     next(error);
   }

@@ -183,7 +183,10 @@ router.post('/batches', authenticate, authorize('MANAGER', 'ADMIN'), [
   body('quantity').isFloat({ gt: 0 }).withMessage('Quantity must be greater than 0'),
   body('startDate').isISO8601().withMessage('Valid start date is required'),
   body('batchType').optional().isIn(['WASTE', 'LIFECYCLE']),
-  body('startStage').optional().isInt({ min: 1, max: 5 }).withMessage('Start stage must be between 1 and 5')
+  body('startStage').optional().isInt({ min: 1, max: 5 }).withMessage('Start stage must be between 1 and 5'),
+  body('wasteType').optional().isString(),
+  body('specificWasteItem').optional().isString(),
+  body('instructions').optional().isString()
 ], async (req, res, next) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
@@ -202,7 +205,10 @@ router.post('/batches', authenticate, authorize('MANAGER', 'ADMIN'), [
       materialLevel,
       moistureContent,
       batchType,
-      startStage
+      startStage,
+      wasteType,
+      specificWasteItem,
+      instructions
     } = req.body;
     
     const batch = await prisma.processingBatch.create({
@@ -218,7 +224,10 @@ router.post('/batches', authenticate, authorize('MANAGER', 'ADMIN'), [
         images: [],
         temperature: temperature ? parseFloat(temperature) : null,
         materialLevel: materialLevel ? parseFloat(materialLevel) : null,
-        moistureContent: moistureContent ? parseFloat(moistureContent) : null
+        moistureContent: moistureContent ? parseFloat(moistureContent) : null,
+        wasteType: wasteType || null,
+        specificWasteItem: specificWasteItem || null,
+        instructions: instructions || null
       },
       include: {
         farm: true,

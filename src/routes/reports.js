@@ -12,6 +12,11 @@ const { generateExcel } = require('../services/excelService');
 
 const LOGO_PATH = path.join(__dirname, '../assets/logo.png');
 
+// Waste statuses that count as "delivered" for a driver — mirrors the driver app
+// (DriverDashboardScreen DELIVERED_STATUSES / DeliveriesScreen Delivered tab).
+// Note: only valid WasteStatus enum values — COMPLETED is not a WasteStatus.
+const WASTE_DELIVERED_STATUSES = ['ACKNOWLEDGED', 'PROCESSING', 'PROCESSED'];
+
 const router = express.Router();
 
 // Generate report
@@ -451,6 +456,27 @@ function companyScope(adminId, userId, kind) {
     ],
     payout: [{ adminId }],
     support: [{ user: { managedById: adminId } }],
+    farm: [{ adminId }],
+    quality: [
+      { batch: { farm: { adminId } } },
+      { checkedBy: { managedById: adminId } },
+    ],
+    cage: [
+      { batch: { farm: { adminId } } },
+      { createdBy: { managedById: adminId } },
+    ],
+    tray: [
+      { batch: { farm: { adminId } } },
+      { createdBy: { managedById: adminId } },
+    ],
+    activity: [
+      { batch: { farm: { adminId } } },
+      { performedBy: { managedById: adminId } },
+    ],
+    review: [
+      { product: { farm: { adminId } } },
+      { product: { createdBy: { managedById: adminId } } },
+    ],
   };
   return { OR: scopes[kind] };
 }
@@ -475,22 +501,43 @@ router.get('/drivers', authenticate, requireReportAccess, async (req, res, next)
       },
       orderBy: { createdAt: 'desc' }
     });
-    const rows = drivers.map(d => ({
-      id: d.id,
-      name: d.fullName,
-      email: d.email ?? '-',
-      status: d.driverProfile?.status ?? 'N/A',
-      vehicleType: d.driverProfile?.vehicleType ?? '-',
-      plateNumber: d.driverProfile?.vehiclePlateNumber ?? '-',
-      totalDeliveries: d.deliveries.length,
-      completedDeliveries: d.deliveries.filter(x => ['DELIVERED', 'COMPLETED'].includes(x.status)).length,
-      earnings: +d.deliveries.filter(x => ['DELIVERED', 'COMPLETED'].includes(x.status)).reduce((s, x) => s + x.total, 0).toFixed(2),
-      rating: d.driverProfile?.rating ?? 5,
-    }));
+
+    // Waste loads each driver delivered to the plant within the period
+    // (the drivers' own deliveries are order deliveries, so waste is counted separately).
+    const wasteAgg = await prisma.wasteRecord.groupBy({
+      by: ['driverId'],
+      where: {
+        driverId: { in: drivers.map(d => d.id) },
+        status: { in: WASTE_DELIVERED_STATUSES },
+        deletedAt: null,
+        ...buildDateWhere(startDate, endDate, 'deliveredAt')
+      },
+      _count: true
+    });
+    const wasteCountByDriver = new Map(wasteAgg.map(w => [w.driverId, w._count]));
+
+    const rows = drivers.map(d => {
+      const wasteDelivered = wasteCountByDriver.get(d.id) ?? 0;
+      return {
+        id: d.id,
+        name: d.fullName,
+        email: d.email ?? '-',
+        status: d.driverProfile?.status ?? 'N/A',
+        vehicleType: d.driverProfile?.vehicleType ?? '-',
+        plateNumber: d.driverProfile?.vehiclePlateNumber ?? '-',
+        totalDeliveries: d.deliveries.length + wasteDelivered,
+        wasteDelivered,
+        completedDeliveries: d.deliveries.filter(x => ['DELIVERED', 'COMPLETED'].includes(x.status)).length,
+        earnings: +d.deliveries.filter(x => ['DELIVERED', 'COMPLETED'].includes(x.status)).reduce((s, x) => s + x.total, 0).toFixed(2),
+        rating: d.driverProfile?.rating ?? 5,
+        joinedAt: d.createdAt,
+      };
+    });
     const stats = {
       total: rows.length,
       active: rows.filter(r => ['ACTIVE', 'APPROVED'].includes(r.status)).length,
       totalDeliveries: rows.reduce((s, r) => s + r.totalDeliveries, 0),
+      totalWasteDelivered: rows.reduce((s, r) => s + r.wasteDelivered, 0),
       avgRating: rows.length ? +(rows.reduce((s, r) => s + r.rating, 0) / rows.length).toFixed(1) : 0
     };
     res.json({ success: true, data: { stats, rows } });
@@ -531,7 +578,9 @@ router.get('/suppliers', authenticate, requireReportAccess, async (req, res, nex
       totalWasteKg: +rows.reduce((s, r) => s + r.wasteSupplied, 0).toFixed(2),
       totalEarningsPaid: +rows.reduce((s, r) => s + r.totalEarnings, 0).toFixed(2)
     };
-    res.json({ success: true, data: { stats, rows } });
+    const byStatus = rows.reduce((acc, r) => { acc[r.status] = (acc[r.status] || 0) + 1; return acc; }, {});
+    const chartData = Object.entries(byStatus).map(([status, count]) => ({ status, count }));
+    res.json({ success: true, data: { stats, rows, chartData } });
   } catch (e) { next(e); }
 });
 
@@ -585,7 +634,7 @@ router.get('/users', authenticate, requireReportAccess, async (req, res, next) =
       select: { id: true, fullName: true, email: true, role: true, status: true, createdAt: true },
       orderBy: { createdAt: 'desc' }
     });
-    const rows = users.map(u => ({ id: u.id, name: u.fullName, email: u.email ?? '-', role: u.role, status: u.status }));
+    const rows = users.map(u => ({ id: u.id, name: u.fullName, email: u.email ?? '-', role: u.role, status: u.status, joinedAt: u.createdAt }));
     const byRole = rows.reduce((acc, r) => { acc[r.role] = (acc[r.role] || 0) + 1; return acc; }, {});
     const chartData = Object.entries(byRole).map(([role, count]) => ({ role, count }));
     const stats = {
@@ -708,7 +757,9 @@ router.get('/payouts', authenticate, requireReportAccess, async (req, res, next)
       totalPaidGhs: +paid.reduce((s, r) => s + r.amountGhs, 0).toFixed(2),
       totalPointsRedeemed: paid.reduce((s, r) => s + r.points, 0)
     };
-    res.json({ success: true, data: { stats, rows } });
+    const byStatus = rows.reduce((acc, r) => { acc[r.status] = (acc[r.status] || 0) + 1; return acc; }, {});
+    const chartData = Object.entries(byStatus).map(([status, count]) => ({ status, count }));
+    res.json({ success: true, data: { stats, rows, chartData } });
   } catch (e) { next(e); }
 });
 
@@ -869,7 +920,9 @@ router.get('/batches', authenticate, requireReportAccess, async (req, res, next)
       totalInputKg: +rows.reduce((s, r) => s + r.quantity, 0).toFixed(2),
       avgConversionRate: completed.length ? +(completed.reduce((s, r) => s + r.conversionRate, 0) / completed.length).toFixed(1) : 0
     };
-    res.json({ success: true, data: { stats, rows } });
+    const byStatus = rows.reduce((acc, r) => { acc[r.status] = (acc[r.status] || 0) + 1; return acc; }, {});
+    const chartData = Object.entries(byStatus).map(([status, count]) => ({ status, count }));
+    res.json({ success: true, data: { stats, rows, chartData } });
   } catch (e) { next(e); }
 });
 
@@ -904,7 +957,12 @@ router.get('/harvested', authenticate, requireReportAccess, async (req, res, nex
       totalFertilizerKg: +rows.reduce((s, r) => s + r.fertilizerOutput, 0).toFixed(2),
       avgConversionRate: rows.length ? +(rows.reduce((s, r) => s + r.conversionRate, 0) / rows.length).toFixed(1) : 0
     };
-    res.json({ success: true, data: { stats, rows } });
+    const chartData = [
+      { name: 'Liquid (L)', value: +rows.reduce((s, r) => s + r.liquidOutput, 0).toFixed(2) },
+      { name: 'Larvae (kg)', value: +rows.reduce((s, r) => s + r.larvaeOutput, 0).toFixed(2) },
+      { name: 'Fertilizer (kg)', value: +rows.reduce((s, r) => s + r.fertilizerOutput, 0).toFixed(2) }
+    ].filter(x => x.value > 0);
+    res.json({ success: true, data: { stats, rows, chartData } });
   } catch (e) { next(e); }
 });
 
@@ -942,7 +1000,9 @@ router.get('/products', authenticate, requireReportAccess, async (req, res, next
       totalStock: rows.reduce((s, r) => s + r.totalStock, 0),
       totalInventoryValue: +rows.reduce((s, r) => s + r.totalValue, 0).toFixed(2)
     };
-    res.json({ success: true, data: { stats, rows } });
+    const byCategory = rows.reduce((acc, r) => { acc[r.category] = (acc[r.category] || 0) + 1; return acc; }, {});
+    const chartData = Object.entries(byCategory).map(([category, count]) => ({ category, count })).sort((a, b) => b.count - a.count);
+    res.json({ success: true, data: { stats, rows, chartData } });
   } catch (e) { next(e); }
 });
 
@@ -979,7 +1039,9 @@ router.get('/bags', authenticate, requireReportAccess, async (req, res, next) =>
       outOfStock: rows.filter(r => r.quantity === 0).length,
       totalInventoryValue: +rows.reduce((s, r) => s + r.inventoryValue, 0).toFixed(2)
     };
-    res.json({ success: true, data: { stats, rows } });
+    const byCategory = rows.reduce((acc, r) => { acc[r.category] = (acc[r.category] || 0) + 1; return acc; }, {});
+    const chartData = Object.entries(byCategory).map(([category, count]) => ({ category, count })).sort((a, b) => b.count - a.count);
+    res.json({ success: true, data: { stats, rows, chartData } });
   } catch (e) { next(e); }
 });
 
@@ -1078,6 +1140,439 @@ router.get('/processing', authenticate, requireReportAccess, async (req, res, ne
   } catch (e) { next(e); }
 });
 
+// ─── Executive summary (Overview) ─────────────────────────────────────────
+// Single helper shared by the /overview endpoint and CSV/PDF export so the
+// KPIs stay consistent everywhere.
+async function buildOverview(startDate, endDate, adminId, userId) {
+  const wasteWhere = { deletedAt: null, ...buildDateWhere(startDate, endDate, 'date'), ...companyScope(adminId, userId, 'waste') };
+  const batchWhere = { ...buildDateWhere(startDate, endDate, 'startDate'), ...companyScope(adminId, userId, 'batch') };
+  const orderWhere = { status: 'COMPLETED', deletedAt: null, ...buildDateWhere(startDate, endDate), ...companyScope(adminId, userId, 'order') };
+  const userWhere = { role: { in: ['DRIVER', 'BUYER', 'SUPPLIER'] }, ...buildDateWhere(startDate, endDate), ...companyScope(adminId, userId, 'user') };
+  const payoutWhere = { ...buildDateWhere(startDate, endDate), ...companyScope(adminId, userId, 'payout') };
+  const supportWhere = { ...buildDateWhere(startDate, endDate), ...companyScope(adminId, userId, 'support') };
+
+  const [wasteRecords, batches, orders, users, payouts, supportTickets, orderItems] = await Promise.all([
+    prisma.wasteRecord.findMany({
+      where: wasteWhere,
+      select: { quantity: true, carbonSaved: true, methanePrevented: true, pointsAwarded: true, sourceType: true, status: true, date: true }
+    }),
+    prisma.processingBatch.findMany({
+      where: batchWhere,
+      select: { status: true, conversionRate: true, larvaeOutput: true, fertilizerOutput: true, liquidOutput: true }
+    }),
+    prisma.order.findMany({
+      where: orderWhere,
+      select: { total: true, createdAt: true, items: { select: { quantity: true } } }
+    }),
+    prisma.user.findMany({ where: userWhere, select: { role: true } }),
+    prisma.payoutRequest.findMany({ where: payoutWhere, select: { amountGhs: true, status: true } }),
+    prisma.supportTicket.findMany({ where: supportWhere, select: { status: true } }),
+    prisma.orderItem.findMany({
+      where: { order: { status: 'COMPLETED', deletedAt: null, ...buildDateWhere(startDate, endDate), ...companyScope(adminId, userId, 'order') } },
+      include: { variant: { include: { product: { select: { id: true, name: true, category: true } } } } }
+    })
+  ]);
+
+  const completedBatches = batches.filter(b => b.status === 'COMPLETED');
+  const totalRevenue = +orders.reduce((s, o) => s + o.total, 0).toFixed(2);
+  const byRole = users.reduce((acc, u) => { acc[u.role] = (acc[u.role] || 0) + 1; return acc; }, {});
+  const paidPayouts = payouts.filter(p => p.status === 'PAID');
+
+  const stats = {
+    totalWasteKg: +wasteRecords.reduce((s, r) => s + r.quantity, 0).toFixed(2),
+    totalWasteRecords: wasteRecords.length,
+    processedKg: +wasteRecords.filter(r => r.status === 'PROCESSED').reduce((s, r) => s + r.quantity, 0).toFixed(2),
+    totalCarbonSaved: +wasteRecords.reduce((s, r) => s + (r.carbonSaved ?? 0), 0).toFixed(2),
+    totalMethanePrevented: +wasteRecords.reduce((s, r) => s + (r.methanePrevented ?? 0), 0).toFixed(2),
+    totalPointsAwarded: wasteRecords.reduce((s, r) => s + r.pointsAwarded, 0),
+    totalBatches: batches.length,
+    completedBatches: completedBatches.length,
+    activeBatches: batches.filter(b => b.status === 'ACTIVE').length,
+    totalLarvaeKg: +completedBatches.reduce((s, b) => s + (b.larvaeOutput ?? 0), 0).toFixed(2),
+    totalFertilizerKg: +completedBatches.reduce((s, b) => s + (b.fertilizerOutput ?? 0), 0).toFixed(2),
+    totalLiquidL: +completedBatches.reduce((s, b) => s + (b.liquidOutput ?? 0), 0).toFixed(2),
+    avgConversionRate: completedBatches.length ? +(completedBatches.reduce((s, b) => s + (b.conversionRate ?? 0), 0) / completedBatches.length).toFixed(1) : 0,
+    totalOrders: orders.length,
+    totalRevenue,
+    avgOrderValue: orders.length ? +(totalRevenue / orders.length).toFixed(2) : 0,
+    totalItemsSold: orders.reduce((s, o) => s + o.items.reduce((x, i) => x + i.quantity, 0), 0),
+    totalBuyers: byRole.BUYER ?? 0,
+    totalSuppliers: byRole.SUPPLIER ?? 0,
+    totalDrivers: byRole.DRIVER ?? 0,
+    totalPayoutsGhs: +paidPayouts.reduce((s, p) => s + p.amountGhs, 0).toFixed(2),
+    pendingPayouts: payouts.filter(p => p.status === 'PENDING').length,
+    openSupportTickets: supportTickets.filter(t => ['OPEN', 'IN_PROGRESS'].includes(t.status)).length
+  };
+
+  return { stats, wasteRecords, batches, orders, orderItems };
+}
+
+router.get('/overview', authenticate, requireReportAccess, async (req, res, next) => {
+  try {
+    const { startDate, endDate } = req.query;
+    const ctx = reportCtx(req);
+    const { stats, wasteRecords, batches, orders, orderItems } = await buildOverview(startDate, endDate, ctx.adminId, ctx.userId);
+
+    const monthKey = (d) => { const x = new Date(d); return `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, '0')}`; };
+    const wasteByMonth = {};
+    wasteRecords.forEach(r => { const k = monthKey(r.date); wasteByMonth[k] = (wasteByMonth[k] || 0) + r.quantity; });
+    const salesByMonth = {};
+    orders.forEach(o => { const k = monthKey(o.createdAt); salesByMonth[k] = (salesByMonth[k] || 0) + o.total; });
+
+    const chartData = {
+      wasteTrend: Object.entries(wasteByMonth).sort(([a], [b]) => a.localeCompare(b)).map(([date, kg]) => ({ date, kg: +kg.toFixed(2) })),
+      salesTrend: Object.entries(salesByMonth).sort(([a], [b]) => a.localeCompare(b)).map(([date, revenue]) => ({ date, revenue: +revenue.toFixed(2) })),
+      sourceMix: Object.entries(wasteRecords.reduce((acc, r) => { acc[r.sourceType] = (acc[r.sourceType] || 0) + r.quantity; return acc; }, {}))
+        .map(([name, value]) => ({ name, value: +value.toFixed(2) }))
+        .sort((a, b) => b.value - a.value),
+      batchStatusMix: Object.entries(batches.reduce((acc, b) => { acc[b.status] = (acc[b.status] || 0) + 1; return acc; }, {}))
+        .map(([name, value]) => ({ name, value }))
+        .sort((a, b) => b.value - a.value),
+      outputMix: [
+        { name: 'Larvae (kg)', value: stats.totalLarvaeKg },
+        { name: 'Fertilizer (kg)', value: stats.totalFertilizerKg },
+        { name: 'Liquid (L)', value: stats.totalLiquidL }
+      ].filter(x => x.value > 0)
+    };
+
+    const productAgg = {};
+    orderItems.forEach(item => {
+      const p = item.variant.product;
+      if (!productAgg[p.id]) productAgg[p.id] = { id: p.id, name: p.name, category: p.category, quantity: 0, revenue: 0, orders: 0 };
+      productAgg[p.id].quantity += item.quantity;
+      productAgg[p.id].revenue += item.subtotal;
+      productAgg[p.id].orders += 1;
+    });
+    const rows = Object.values(productAgg)
+      .sort((a, b) => b.revenue - a.revenue)
+      .slice(0, 10)
+      .map(p => ({ ...p, revenue: +p.revenue.toFixed(2) }));
+
+    res.json({ success: true, data: { stats, rows, chartData } });
+  } catch (e) { next(e); }
+});
+
+// ─── Farm Performance Report ───────────────────────────────────────────────
+router.get('/farms', authenticate, requireReportAccess, async (req, res, next) => {
+  try {
+    const { startDate, endDate } = req.query;
+    const scope = companyScope(reportCtx(req).adminId, reportCtx(req).userId, 'farm');
+    const farms = await prisma.farm.findMany({
+      where: { deletedAt: null, ...scope },
+      include: {
+        _count: { select: { products: true } },
+        wasteRecords: { where: { deletedAt: null, ...buildDateWhere(startDate, endDate, 'date') }, select: { quantity: true, carbonSaved: true } },
+        processingBatches: { where: { ...buildDateWhere(startDate, endDate, 'startDate') }, select: { quantity: true, larvaeOutput: true, fertilizerOutput: true, liquidOutput: true, status: true } },
+        orders: { where: { status: 'COMPLETED', deletedAt: null, ...buildDateWhere(startDate, endDate) }, select: { total: true } }
+      },
+      orderBy: { createdAt: 'desc' }
+    });
+    const rows = farms.map(f => {
+      const completed = f.processingBatches.filter(b => b.status === 'COMPLETED');
+      return {
+        id: f.id,
+        name: f.name,
+        type: f.type,
+        status: f.status,
+        region: f.region ?? '-',
+        wasteRecords: f.wasteRecords.length,
+        wasteKg: +f.wasteRecords.reduce((s, r) => s + r.quantity, 0).toFixed(2),
+        carbonSaved: +f.wasteRecords.reduce((s, r) => s + (r.carbonSaved ?? 0), 0).toFixed(2),
+        batches: f.processingBatches.length,
+        completedBatches: completed.length,
+        larvaeKg: +completed.reduce((s, b) => s + (b.larvaeOutput ?? 0), 0).toFixed(2),
+        fertilizerKg: +completed.reduce((s, b) => s + (b.fertilizerOutput ?? 0), 0).toFixed(2),
+        products: f._count.products,
+        orders: f.orders.length,
+        revenue: +f.orders.reduce((s, o) => s + o.total, 0).toFixed(2)
+      };
+    });
+    const chartData = rows.filter(r => r.wasteKg > 0).map(r => ({ name: r.name, wasteKg: r.wasteKg }));
+    const stats = {
+      total: rows.length,
+      active: rows.filter(r => r.status === 'ACTIVE').length,
+      totalWasteKg: +rows.reduce((s, r) => s + r.wasteKg, 0).toFixed(2),
+      totalCarbonSaved: +rows.reduce((s, r) => s + r.carbonSaved, 0).toFixed(2),
+      totalRevenue: +rows.reduce((s, r) => s + r.revenue, 0).toFixed(2),
+      totalOutputKg: +rows.reduce((s, r) => s + r.larvaeKg + r.fertilizerKg, 0).toFixed(2)
+    };
+    res.json({ success: true, data: { stats, rows, chartData } });
+  } catch (e) { next(e); }
+});
+
+// ─── Quality Control Report ────────────────────────────────────────────────
+router.get('/quality', authenticate, requireReportAccess, async (req, res, next) => {
+  try {
+    const { startDate, endDate } = req.query;
+    const scope = companyScope(reportCtx(req).adminId, reportCtx(req).userId, 'quality');
+    const checks = await prisma.qualityCheck.findMany({
+      where: { ...buildDateWhere(startDate, endDate, 'checkedAt'), ...scope },
+      select: { id: true, batchId: true, checkType: true, parameter: true, value: true, unit: true, minThreshold: true, maxThreshold: true, passed: true, checkedById: true, checkedAt: true },
+      orderBy: { checkedAt: 'desc' }
+    });
+    // Resolve display names separately so orphaned batch/user references
+    // (deleted rows) degrade to '-' instead of failing the whole query.
+    const [batchMap, userMap] = await Promise.all([
+      prisma.processingBatch.findMany({
+        where: { id: { in: [...new Set(checks.map(c => c.batchId).filter(Boolean))] } },
+        select: { id: true, batchNumber: true, processType: true, farm: { select: { name: true } } }
+      }).then(bs => new Map(bs.map(b => [b.id, b]))),
+      prisma.user.findMany({
+        where: { id: { in: [...new Set(checks.map(c => c.checkedById).filter(Boolean))] } },
+        select: { id: true, fullName: true }
+      }).then(us => new Map(us.map(u => [u.id, u.fullName])))
+    ]);
+    const rows = checks.map(c => {
+      const b = c.batchId ? batchMap.get(c.batchId) : null;
+      return {
+        id: c.id,
+        batchNumber: b?.batchNumber ?? '-',
+        processType: b?.processType ?? null,
+        farm: b?.farm?.name ?? '-',
+        checkType: c.checkType,
+        parameter: c.parameter,
+        value: c.value,
+        unit: c.unit,
+        minThreshold: c.minThreshold ?? null,
+        maxThreshold: c.maxThreshold ?? null,
+        passed: c.passed,
+        checkedBy: c.checkedById && userMap.get(c.checkedById) ? userMap.get(c.checkedById) : '-',
+        checkedAt: c.checkedAt
+      };
+    });
+    const byType = {};
+    rows.forEach(r => {
+      if (!byType[r.checkType]) byType[r.checkType] = { type: r.checkType, passed: 0, failed: 0 };
+      byType[r.checkType][r.passed ? 'passed' : 'failed'] += 1;
+    });
+    const chartData = Object.values(byType);
+    const passed = rows.filter(r => r.passed).length;
+    const stats = {
+      totalChecks: rows.length,
+      passed,
+      failed: rows.length - passed,
+      passRate: rows.length ? +((passed / rows.length) * 100).toFixed(1) : 0,
+      batchesChecked: new Set(rows.map(r => r.batchNumber)).size
+    };
+    res.json({ success: true, data: { stats, rows, chartData } });
+  } catch (e) { next(e); }
+});
+
+// ─── Environmental Impact (Carbon) Report ──────────────────────────────────
+router.get('/carbon', authenticate, requireReportAccess, async (req, res, next) => {
+  try {
+    const { startDate, endDate } = req.query;
+    const scope = companyScope(reportCtx(req).adminId, reportCtx(req).userId, 'waste');
+    const records = await prisma.wasteRecord.findMany({
+      where: { deletedAt: null, carbonSaved: { not: null }, ...buildDateWhere(startDate, endDate, 'date'), ...scope },
+      select: { id: true, sourceName: true, sourceType: true, quantity: true, unit: true, carbonSaved: true, methanePrevented: true, pointsAwarded: true, date: true, farm: { select: { name: true } } },
+      orderBy: { date: 'desc' }
+    });
+    const rows = records.map(r => ({
+      id: r.id,
+      sourceName: r.sourceName,
+      sourceType: r.sourceType,
+      quantity: r.quantity,
+      unit: r.unit,
+      carbonSaved: +(r.carbonSaved ?? 0),
+      methanePrevented: +(r.methanePrevented ?? 0),
+      pointsAwarded: r.pointsAwarded,
+      farm: r.farm?.name ?? '-',
+      date: r.date
+    }));
+    const monthKey = (d) => { const x = new Date(d); return `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, '0')}`; };
+    const byMonth = {};
+    rows.forEach(r => { const k = monthKey(r.date); byMonth[k] = (byMonth[k] || 0) + r.carbonSaved; });
+    const bySource = {};
+    rows.forEach(r => { bySource[r.sourceType] = (bySource[r.sourceType] || 0) + r.carbonSaved; });
+    const chartData = {
+      carbonTrend: Object.entries(byMonth).sort(([a], [b]) => a.localeCompare(b)).map(([date, carbon]) => ({ date, carbon: +carbon.toFixed(2) })),
+      sourceMix: Object.entries(bySource).map(([name, value]) => ({ name, value: +value.toFixed(2) })).sort((a, b) => b.value - a.value)
+    };
+    const totalCarbonSaved = +rows.reduce((s, r) => s + r.carbonSaved, 0).toFixed(2);
+    const totalKg = +rows.reduce((s, r) => s + r.quantity, 0).toFixed(2);
+    const stats = {
+      totalRecords: rows.length,
+      totalCarbonSaved,
+      totalMethanePrevented: +rows.reduce((s, r) => s + r.methanePrevented, 0).toFixed(2),
+      totalWasteKg: totalKg,
+      avgCarbonPerKg: totalKg ? +(totalCarbonSaved / totalKg).toFixed(3) : 0,
+      totalPointsAwarded: rows.reduce((s, r) => s + r.pointsAwarded, 0)
+    };
+    res.json({ success: true, data: { stats, rows, chartData } });
+  } catch (e) { next(e); }
+});
+
+// ─── Production Infrastructure (Cages & Trays) Report ──────────────────────
+router.get('/infrastructure', authenticate, requireReportAccess, async (req, res, next) => {
+  try {
+    const { startDate, endDate } = req.query;
+    const ctx = reportCtx(req);
+    const cageScope = companyScope(ctx.adminId, ctx.userId, 'cage');
+    const trayScope = companyScope(ctx.adminId, ctx.userId, 'tray');
+    const dateWhere = buildDateWhere(startDate, endDate);
+    const [cages, trays] = await Promise.all([
+      prisma.cage.findMany({
+        where: { ...dateWhere, ...cageScope },
+        include: { batch: { select: { batchNumber: true } } },
+        orderBy: { createdAt: 'desc' }
+      }),
+      prisma.tray.findMany({
+        where: { ...dateWhere, ...trayScope },
+        include: { batch: { select: { batchNumber: true } } },
+        orderBy: { createdAt: 'desc' }
+      })
+    ]);
+    const cageRows = cages.map(c => ({ id: c.id, code: c.cageId, kind: 'CAGE', description: c.description ?? '-', location: c.location ?? '-', capacity: c.capacity ?? 0, status: c.status, batch: c.batch?.batchNumber ?? '-', createdAt: c.createdAt }));
+    const trayRows = trays.map(t => ({ id: t.id, code: t.trayId, kind: 'TRAY', description: t.description ?? '-', location: t.location ?? '-', capacity: t.capacity ?? 0, status: t.status, batch: t.batch?.batchNumber ?? '-', createdAt: t.createdAt }));
+    const rows = [...cageRows, ...trayRows];
+    const isActive = (s) => ['ACTIVE', 'IN_USE'].includes(s);
+    const chartData = [
+      { name: 'Cages', active: cages.filter(c => isActive(c.status)).length, inactive: cages.filter(c => !isActive(c.status)).length },
+      { name: 'Trays', active: trays.filter(t => isActive(t.status)).length, inactive: trays.filter(t => !isActive(t.status)).length }
+    ];
+    const stats = {
+      totalCages: cages.length,
+      activeCages: chartData[0].active,
+      totalTrays: trays.length,
+      activeTrays: chartData[1].active,
+      totalUnits: rows.length,
+      inUse: rows.filter(r => r.batch !== '-').length
+    };
+    res.json({ success: true, data: { stats, rows, chartData } });
+  } catch (e) { next(e); }
+});
+
+// ─── Payment Analysis Report ───────────────────────────────────────────────
+router.get('/payments', authenticate, requireReportAccess, async (req, res, next) => {
+  try {
+    const { startDate, endDate } = req.query;
+    const scope = companyScope(reportCtx(req).adminId, reportCtx(req).userId, 'order');
+    const orders = await prisma.order.findMany({
+      where: { deletedAt: null, ...buildDateWhere(startDate, endDate), ...scope },
+      include: { customer: { select: { fullName: true } } },
+      orderBy: { createdAt: 'desc' }
+    });
+    const rows = orders.map(o => ({
+      id: o.id,
+      orderNumber: o.orderNumber,
+      customer: o.customer.fullName,
+      total: o.total,
+      paymentMethod: o.paymentMethod,
+      paymentStatus: o.paymentStatus,
+      paidAt: o.paidAt,
+      createdAt: o.createdAt
+    }));
+    const methodMix = rows.reduce((acc, r) => { acc[r.paymentMethod] = (acc[r.paymentMethod] || 0) + 1; return acc; }, {});
+    const chartData = Object.entries(methodMix).map(([name, value]) => ({ name, value }));
+    const byStatus = rows.reduce((acc, r) => { acc[r.paymentStatus] = (acc[r.paymentStatus] || 0) + 1; return acc; }, {});
+    const paid = rows.filter(r => r.paymentStatus === 'PAID');
+    const stats = {
+      total: rows.length,
+      paid: byStatus.PAID ?? 0,
+      pending: byStatus.PENDING ?? 0,
+      failed: byStatus.FAILED ?? 0,
+      refunded: (byStatus.REFUNDED ?? 0) + (byStatus.PARTIALLY_REFUNDED ?? 0),
+      totalPaidGhs: +paid.reduce((s, r) => s + r.total, 0).toFixed(2),
+      totalOutstandingGhs: +rows.filter(r => r.paymentStatus === 'PENDING').reduce((s, r) => s + r.total, 0).toFixed(2)
+    };
+    res.json({ success: true, data: { stats, rows, chartData } });
+  } catch (e) { next(e); }
+});
+
+// ─── Activity Log Report ───────────────────────────────────────────────────
+router.get('/activity', authenticate, requireReportAccess, async (req, res, next) => {
+  try {
+    const { startDate, endDate } = req.query;
+    const scope = companyScope(reportCtx(req).adminId, reportCtx(req).userId, 'activity');
+    const logs = await prisma.activityLog.findMany({
+      where: { ...buildDateWhere(startDate, endDate, 'timestamp'), ...scope },
+      select: { id: true, batchId: true, action: true, description: true, performedById: true, timestamp: true },
+      orderBy: { timestamp: 'desc' },
+      take: 500
+    });
+    // Resolve display names separately — legacy/orphaned batch rows must not
+    // break the report (Prisma errors on missing required relations).
+    const [batchMap, userMap] = await Promise.all([
+      prisma.processingBatch.findMany({
+        where: { id: { in: [...new Set(logs.map(l => l.batchId).filter(Boolean))] } },
+        select: { id: true, batchNumber: true }
+      }).then(bs => new Map(bs.map(b => [b.id, b.batchNumber]))),
+      prisma.user.findMany({
+        where: { id: { in: [...new Set(logs.map(l => l.performedById).filter(Boolean))] } },
+        select: { id: true, fullName: true }
+      }).then(us => new Map(us.map(u => [u.id, u.fullName])))
+    ]);
+    const rows = logs.map(l => ({
+      id: l.id,
+      batchNumber: batchMap.get(l.batchId) ?? '-',
+      action: l.action,
+      description: l.description ?? '-',
+      performedBy: userMap.get(l.performedById) ?? '-',
+      timestamp: l.timestamp
+    }));
+    const byAction = rows.reduce((acc, r) => { acc[r.action] = (acc[r.action] || 0) + 1; return acc; }, {});
+    const chartData = Object.entries(byAction).map(([action, count]) => ({ action, count })).sort((a, b) => b.count - a.count);
+    const stats = {
+      total: rows.length,
+      batchStarted: byAction.BATCH_STARTED ?? 0,
+      batchCompleted: byAction.BATCH_COMPLETED ?? 0,
+      qualityChecked: byAction.QUALITY_CHECKED ?? 0,
+      outputRecorded: byAction.OUTPUT_RECORDED ?? 0,
+      uniqueBatches: new Set(rows.map(r => r.batchNumber)).size
+    };
+    res.json({ success: true, data: { stats, rows, chartData } });
+  } catch (e) { next(e); }
+});
+
+// ─── Product Reviews Report ────────────────────────────────────────────────
+router.get('/reviews', authenticate, requireReportAccess, async (req, res, next) => {
+  try {
+    const { startDate, endDate } = req.query;
+    const scope = companyScope(reportCtx(req).adminId, reportCtx(req).userId, 'review');
+    const reviews = await prisma.productReview.findMany({
+      where: { ...buildDateWhere(startDate, endDate), ...scope },
+      select: { id: true, productId: true, userId: true, rating: true, title: true, comment: true, verified: true, createdAt: true },
+      orderBy: { createdAt: 'desc' },
+      take: 500
+    });
+    // Resolve display names separately — orphaned product/user references
+    // must degrade to '-' rather than failing the report query.
+    const [productMap, userMap] = await Promise.all([
+      prisma.product.findMany({
+        where: { id: { in: [...new Set(reviews.map(r => r.productId).filter(Boolean))] } },
+        select: { id: true, name: true, category: true }
+      }).then(ps => new Map(ps.map(p => [p.id, p]))),
+      prisma.user.findMany({
+        where: { id: { in: [...new Set(reviews.map(r => r.userId).filter(Boolean))] } },
+        select: { id: true, fullName: true }
+      }).then(us => new Map(us.map(u => [u.id, u.fullName])))
+    ]);
+    const rows = reviews.map(r => ({
+      id: r.id,
+      product: productMap.get(r.productId)?.name ?? '-',
+      category: productMap.get(r.productId)?.category ?? null,
+      user: userMap.get(r.userId) ?? '-',
+      rating: r.rating,
+      title: r.title ?? '-',
+      comment: r.comment ?? '-',
+      verified: r.verified,
+      createdAt: r.createdAt
+    }));
+    const byRating = rows.reduce((acc, r) => { acc[r.rating] = (acc[r.rating] || 0) + 1; return acc; }, {});
+    const chartData = Object.entries(byRating).map(([rating, count]) => ({ rating: Number(rating), count })).sort((a, b) => a.rating - b.rating);
+    const totalRating = rows.reduce((s, r) => s + r.rating, 0);
+    const stats = {
+      total: rows.length,
+      avgRating: rows.length ? +(totalRating / rows.length).toFixed(1) : 0,
+      verified: rows.filter(r => r.verified).length,
+      fiveStar: byRating[5] ?? 0,
+      oneStar: byRating[1] ?? 0
+    };
+    res.json({ success: true, data: { stats, rows, chartData } });
+  } catch (e) { next(e); }
+});
+
 // ─── CSV helpers ───────────────────────────────────────────────────────────
 
 function toCSV(rows) {
@@ -1104,14 +1599,29 @@ async function fetchExportRows(type, startDate, endDate, adminId, userId) {
         },
         orderBy: { createdAt: 'desc' }
       });
-      return drivers.map(d => ({
-        name: d.fullName, email: d.email ?? '-', status: d.driverProfile?.status ?? 'N/A',
-        vehicleType: d.driverProfile?.vehicleType ?? '-', plateNumber: d.driverProfile?.vehiclePlateNumber ?? '-',
-        totalDeliveries: d.deliveries.length,
-        completedDeliveries: d.deliveries.filter(x => ['DELIVERED', 'COMPLETED'].includes(x.status)).length,
-        earnings: +d.deliveries.filter(x => ['DELIVERED', 'COMPLETED'].includes(x.status)).reduce((s, x) => s + x.total, 0).toFixed(2),
-        rating: d.driverProfile?.rating ?? 5
-      }));
+      const wasteAgg = await prisma.wasteRecord.groupBy({
+        by: ['driverId'],
+        where: {
+          driverId: { in: drivers.map(d => d.id) },
+          status: { in: WASTE_DELIVERED_STATUSES },
+          deletedAt: null,
+          ...buildDateWhere(startDate, endDate, 'deliveredAt')
+        },
+        _count: true
+      });
+      const wasteCountByDriver = new Map(wasteAgg.map(w => [w.driverId, w._count]));
+      return drivers.map(d => {
+        const wasteDelivered = wasteCountByDriver.get(d.id) ?? 0;
+        return {
+          name: d.fullName, email: d.email ?? '-', status: d.driverProfile?.status ?? 'N/A',
+          vehicleType: d.driverProfile?.vehicleType ?? '-', plateNumber: d.driverProfile?.vehiclePlateNumber ?? '-',
+          totalDeliveries: d.deliveries.length + wasteDelivered,
+          wasteDelivered,
+          completedDeliveries: d.deliveries.filter(x => ['DELIVERED', 'COMPLETED'].includes(x.status)).length,
+          earnings: +d.deliveries.filter(x => ['DELIVERED', 'COMPLETED'].includes(x.status)).reduce((s, x) => s + x.total, 0).toFixed(2),
+          rating: d.driverProfile?.rating ?? 5
+        };
+      });
     }
     case 'suppliers': {
       const scope = companyScope(adminId, userId, 'user');
@@ -1353,6 +1863,142 @@ async function fetchExportRows(type, startDate, endDate, adminId, userId) {
         paymentMethod: o.paymentMethod, date: o.createdAt
       }));
     }
+    case 'overview': {
+      const { stats } = await buildOverview(startDate, endDate, adminId, userId);
+      return [
+        { metric: 'Waste collected (kg)', value: stats.totalWasteKg },
+        { metric: 'Waste records', value: stats.totalWasteRecords },
+        { metric: 'Waste processed (kg)', value: stats.processedKg },
+        { metric: 'Carbon saved (kg)', value: stats.totalCarbonSaved },
+        { metric: 'Methane prevented (kg CO2e)', value: stats.totalMethanePrevented },
+        { metric: 'Points awarded', value: stats.totalPointsAwarded },
+        { metric: 'Total batches', value: stats.totalBatches },
+        { metric: 'Completed batches', value: stats.completedBatches },
+        { metric: 'Active batches', value: stats.activeBatches },
+        { metric: 'Larvae output (kg)', value: stats.totalLarvaeKg },
+        { metric: 'Fertilizer output (kg)', value: stats.totalFertilizerKg },
+        { metric: 'Liquid output (L)', value: stats.totalLiquidL },
+        { metric: 'Avg conversion rate (%)', value: stats.avgConversionRate },
+        { metric: 'Completed orders', value: stats.totalOrders },
+        { metric: 'Total revenue (GHS)', value: stats.totalRevenue },
+        { metric: 'Avg order value (GHS)', value: stats.avgOrderValue },
+        { metric: 'Items sold', value: stats.totalItemsSold },
+        { metric: 'Buyers', value: stats.totalBuyers },
+        { metric: 'Suppliers', value: stats.totalSuppliers },
+        { metric: 'Drivers', value: stats.totalDrivers },
+        { metric: 'Payouts paid (GHS)', value: stats.totalPayoutsGhs },
+        { metric: 'Pending payouts', value: stats.pendingPayouts },
+        { metric: 'Open support tickets', value: stats.openSupportTickets }
+      ];
+    }
+    case 'farms': {
+      const scope = companyScope(adminId, userId, 'farm');
+      const farms = await prisma.farm.findMany({
+        where: { deletedAt: null, ...scope },
+        include: {
+          wasteRecords: { where: { deletedAt: null, ...buildDateWhere(startDate, endDate, 'date') }, select: { quantity: true, carbonSaved: true } },
+          processingBatches: { where: { ...buildDateWhere(startDate, endDate, 'startDate') }, select: { quantity: true, larvaeOutput: true, fertilizerOutput: true, liquidOutput: true, status: true } },
+          orders: { where: { status: 'COMPLETED', deletedAt: null, ...buildDateWhere(startDate, endDate) }, select: { total: true } }
+        },
+        orderBy: { createdAt: 'desc' }
+      });
+      return farms.map(f => {
+        const completed = f.processingBatches.filter(b => b.status === 'COMPLETED');
+        return {
+          farm: f.name, type: f.type, status: f.status, region: f.region ?? '-',
+          wasteRecords: f.wasteRecords.length,
+          wasteKg: +f.wasteRecords.reduce((s, r) => s + r.quantity, 0).toFixed(2),
+          carbonSaved: +f.wasteRecords.reduce((s, r) => s + (r.carbonSaved ?? 0), 0).toFixed(2),
+          batches: f.processingBatches.length,
+          completedBatches: completed.length,
+          larvaeKg: +completed.reduce((s, b) => s + (b.larvaeOutput ?? 0), 0).toFixed(2),
+          fertilizerKg: +completed.reduce((s, b) => s + (b.fertilizerOutput ?? 0), 0).toFixed(2),
+          orders: f.orders.length,
+          revenue: +f.orders.reduce((s, o) => s + o.total, 0).toFixed(2)
+        };
+      });
+    }
+    case 'quality': {
+      const scope = companyScope(adminId, userId, 'quality');
+      const checks = await prisma.qualityCheck.findMany({
+        where: { ...buildDateWhere(startDate, endDate, 'checkedAt'), ...scope },
+        select: { id: true, batchId: true, checkType: true, parameter: true, value: true, unit: true, minThreshold: true, maxThreshold: true, passed: true, checkedById: true, checkedAt: true },
+        orderBy: { checkedAt: 'desc' }
+      });
+      const [batchMap, userMap] = await Promise.all([
+        prisma.processingBatch.findMany({ where: { id: { in: [...new Set(checks.map(c => c.batchId).filter(Boolean))] } }, select: { id: true, batchNumber: true } }).then(bs => new Map(bs.map(b => [b.id, b.batchNumber]))),
+        prisma.user.findMany({ where: { id: { in: [...new Set(checks.map(c => c.checkedById).filter(Boolean))] } }, select: { id: true, fullName: true } }).then(us => new Map(us.map(u => [u.id, u.fullName])))
+      ]);
+      return checks.map(c => ({
+        batchNumber: batchMap.get(c.batchId) ?? '-', checkType: c.checkType, parameter: c.parameter,
+        value: c.value, unit: c.unit, minThreshold: c.minThreshold ?? '-', maxThreshold: c.maxThreshold ?? '-',
+        passed: c.passed ? 'Yes' : 'No', checkedBy: userMap.get(c.checkedById) ?? '-', date: c.checkedAt
+      }));
+    }
+    case 'carbon': {
+      const scope = companyScope(adminId, userId, 'waste');
+      const records = await prisma.wasteRecord.findMany({
+        where: { deletedAt: null, carbonSaved: { not: null }, ...buildDateWhere(startDate, endDate, 'date'), ...scope },
+        select: { sourceName: true, sourceType: true, quantity: true, unit: true, carbonSaved: true, methanePrevented: true, pointsAwarded: true, date: true },
+        orderBy: { date: 'desc' }
+      });
+      return records.map(r => ({
+        sourceName: r.sourceName, sourceType: r.sourceType, quantity: r.quantity, unit: r.unit,
+        carbonSaved: +(r.carbonSaved ?? 0), methanePrevented: +(r.methanePrevented ?? 0),
+        pointsAwarded: r.pointsAwarded, date: r.date
+      }));
+    }
+    case 'infrastructure': {
+      const dateWhere = buildDateWhere(startDate, endDate);
+      const [cages, trays] = await Promise.all([
+        prisma.cage.findMany({ where: { ...dateWhere, ...companyScope(adminId, userId, 'cage') }, include: { batch: { select: { batchNumber: true } } }, orderBy: { createdAt: 'desc' } }),
+        prisma.tray.findMany({ where: { ...dateWhere, ...companyScope(adminId, userId, 'tray') }, include: { batch: { select: { batchNumber: true } } }, orderBy: { createdAt: 'desc' } })
+      ]);
+      return [
+        ...cages.map(c => ({ kind: 'Cage', code: c.cageId, location: c.location ?? '-', capacity: c.capacity ?? 0, status: c.status, batch: c.batch?.batchNumber ?? '-', date: c.createdAt })),
+        ...trays.map(t => ({ kind: 'Tray', code: t.trayId, location: t.location ?? '-', capacity: t.capacity ?? 0, status: t.status, batch: t.batch?.batchNumber ?? '-', date: t.createdAt }))
+      ];
+    }
+    case 'payments': {
+      const scope = companyScope(adminId, userId, 'order');
+      const orders = await prisma.order.findMany({
+        where: { deletedAt: null, ...buildDateWhere(startDate, endDate), ...scope },
+        include: { customer: { select: { fullName: true } } },
+        orderBy: { createdAt: 'desc' }
+      });
+      return orders.map(o => ({
+        orderNumber: o.orderNumber, customer: o.customer.fullName, total: o.total,
+        paymentMethod: o.paymentMethod, paymentStatus: o.paymentStatus, paidAt: o.paidAt ?? '-', date: o.createdAt
+      }));
+    }
+    case 'activity': {
+      const scope = companyScope(adminId, userId, 'activity');
+      const logs = await prisma.activityLog.findMany({
+        where: { ...buildDateWhere(startDate, endDate, 'timestamp'), ...scope },
+        select: { id: true, batchId: true, action: true, description: true, performedById: true, timestamp: true },
+        orderBy: { timestamp: 'desc' },
+        take: 500
+      });
+      const [batchMap, userMap] = await Promise.all([
+        prisma.processingBatch.findMany({ where: { id: { in: [...new Set(logs.map(l => l.batchId).filter(Boolean))] } }, select: { id: true, batchNumber: true } }).then(bs => new Map(bs.map(b => [b.id, b.batchNumber]))),
+        prisma.user.findMany({ where: { id: { in: [...new Set(logs.map(l => l.performedById).filter(Boolean))] } }, select: { id: true, fullName: true } }).then(us => new Map(us.map(u => [u.id, u.fullName])))
+      ]);
+      return logs.map(l => ({ batchNumber: batchMap.get(l.batchId) ?? '-', action: l.action, description: l.description ?? '-', performedBy: userMap.get(l.performedById) ?? '-', date: l.timestamp }));
+    }
+    case 'reviews': {
+      const scope = companyScope(adminId, userId, 'review');
+      const reviews = await prisma.productReview.findMany({
+        where: { ...buildDateWhere(startDate, endDate), ...scope },
+        select: { id: true, productId: true, userId: true, rating: true, title: true, comment: true, verified: true, createdAt: true },
+        orderBy: { createdAt: 'desc' },
+        take: 500
+      });
+      const [productMap, userMap] = await Promise.all([
+        prisma.product.findMany({ where: { id: { in: [...new Set(reviews.map(r => r.productId).filter(Boolean))] } }, select: { id: true, name: true } }).then(ps => new Map(ps.map(p => [p.id, p.name]))),
+        prisma.user.findMany({ where: { id: { in: [...new Set(reviews.map(r => r.userId).filter(Boolean))] } }, select: { id: true, fullName: true } }).then(us => new Map(us.map(u => [u.id, u.fullName])))
+      ]);
+      return reviews.map(r => ({ product: productMap.get(r.productId) ?? '-', user: userMap.get(r.userId) ?? '-', rating: r.rating, title: r.title ?? '-', comment: r.comment ?? '-', verified: r.verified ? 'Yes' : 'No', date: r.createdAt }));
+    }
     default: return [];
   }
 }
@@ -1362,7 +2008,7 @@ router.get('/export/:type', authenticate, requireReportAccess, async (req, res, 
   try {
     const { type } = req.params;
     const { startDate, endDate } = req.query;
-    const validTypes = ['drivers', 'suppliers', 'buyers', 'users', 'orders', 'fleet', 'payouts', 'support', 'waste', 'processed-waste', 'batches', 'harvested', 'products', 'bags', 'costs', 'revenue'];
+    const validTypes = ['overview', 'drivers', 'suppliers', 'buyers', 'users', 'orders', 'fleet', 'payouts', 'support', 'waste', 'processed-waste', 'batches', 'harvested', 'products', 'bags', 'costs', 'revenue', 'farms', 'quality', 'carbon', 'infrastructure', 'payments', 'activity', 'reviews'];
     if (!validTypes.includes(type)) {
       return res.status(400).json({ success: false, message: 'Invalid report type' });
     }
@@ -1392,7 +2038,7 @@ router.get('/export/pdf/:type', authenticate, requireReportAccess, async (req, r
   try {
     const { type } = req.params;
     const { startDate, endDate } = req.query;
-    const validTypes = ['drivers', 'suppliers', 'buyers', 'users', 'orders', 'fleet', 'payouts', 'support', 'waste', 'processed-waste', 'batches', 'harvested', 'products', 'bags', 'costs', 'revenue'];
+    const validTypes = ['overview', 'drivers', 'suppliers', 'buyers', 'users', 'orders', 'fleet', 'payouts', 'support', 'waste', 'processed-waste', 'batches', 'harvested', 'products', 'bags', 'costs', 'revenue', 'farms', 'quality', 'carbon', 'infrastructure', 'payments', 'activity', 'reviews'];
     if (!validTypes.includes(type)) {
       return res.status(400).json({ success: false, message: 'Invalid report type' });
     }
@@ -1563,7 +2209,13 @@ router.get('/templates/list', authenticate, async (req, res) => {
     { id: 'DRIVER_PERFORMANCE', name: 'Driver Performance', description: 'Delivery driver analytics', category: 'Logistics' },
     { id: 'CUSTOMER_ANALYTICS', name: 'Customer Analytics', description: 'Customer behavior insights', category: 'Sales' },
     { id: 'INVENTORY_REPORT', name: 'Inventory Report', description: 'Stock levels and values', category: 'Inventory' },
-    { id: 'QUALITY_REPORT', name: 'Quality Control', description: 'Quality check results', category: 'Quality' }
+    { id: 'QUALITY_REPORT', name: 'Quality Control', description: 'Quality check results', category: 'Quality' },
+    { id: 'EXECUTIVE_SUMMARY', name: 'Executive Summary', description: 'Company-wide KPI overview', category: 'Overview' },
+    { id: 'ENVIRONMENTAL_IMPACT', name: 'Environmental Impact', description: 'Carbon & methane savings', category: 'Sustainability' },
+    { id: 'PAYMENT_ANALYSIS', name: 'Payment Analysis', description: 'Payment method & status breakdown', category: 'Finance' },
+    { id: 'INFRASTRUCTURE', name: 'Cages & Trays', description: 'Production infrastructure utilization', category: 'Production' },
+    { id: 'ACTIVITY_LOG', name: 'Activity Log', description: 'Batch & processing activity trail', category: 'Operations' },
+    { id: 'PRODUCT_REVIEWS', name: 'Product Reviews', description: 'Customer feedback & ratings', category: 'Sales' }
   ];
   
   res.json({ success: true, data: templates });
