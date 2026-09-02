@@ -77,7 +77,18 @@ const config = {
   ALLOWED_FILE_TYPES: process.env.ALLOWED_FILE_TYPES 
     ? process.env.ALLOWED_FILE_TYPES.split(',') 
     : ['image/jpeg', 'image/png', 'image/jpg', 'application/pdf'],
-  UPLOAD_DIR: process.env.UPLOAD_DIR || path.resolve(__dirname, '../../uploads'),
+  // Absolute base directory for every uploaded file. Production runs on
+  // Hostinger hbuilds, which replaces the whole app folder (and rewrites the
+  // panel env back to a relative './uploads') on every deploy — so a relative
+  // UPLOAD_DIR would point inside the versioned folder and get wiped. Uploads
+  // therefore live in a stable directory OUTSIDE the app and only an absolute
+  // UPLOAD_DIR override is honoured.
+  UPLOAD_DIR:
+    process.env.UPLOAD_DIR && path.isAbsolute(process.env.UPLOAD_DIR)
+      ? process.env.UPLOAD_DIR
+      : process.env.NODE_ENV === 'production'
+        ? '/home/u568151167/biodigital-uploads'
+        : path.resolve(__dirname, '../../uploads'),
   
   // Rate Limiting
   RATE_LIMIT_WINDOW_MS: parseInt(process.env.RATE_LIMIT_WINDOW_MS, 10) || 900000, // 15 minutes
