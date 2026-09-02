@@ -29,32 +29,36 @@ const createUploadDirs = () => {
 
 createUploadDirs();
 
-// Configure storage
+// Configure storage — files are written under config.UPLOAD_DIR (an absolute
+// directory that production points outside the app folder so redeploys do not
+// wipe uploaded files).
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
-    let folder = 'uploads/';
-    
+    let sub = 'documents';
+
     if (file.fieldname === 'waste_image' || file.fieldname === 'waste_images') {
-      folder += 'images/waste';
+      sub = 'images/waste';
     } else if (file.fieldname === 'product_image' || file.fieldname === 'product_images') {
-      folder += 'images/products';
+      sub = 'images/products';
     } else if (file.fieldname === 'profile_image' || file.fieldname === 'avatar') {
-      folder += 'images/profiles';
+      sub = 'images/profiles';
     } else if (file.fieldname === 'batch_image' || file.fieldname === 'batch_images') {
-      folder += 'images/batches';
+      sub = 'images/batches';
     } else if (file.fieldname === 'driver_license') {
-      folder += 'documents/driver-licenses';
+      sub = 'documents/driver-licenses';
     } else if (file.fieldname === 'id_card') {
-      folder += 'documents/id-cards';
+      sub = 'documents/id-cards';
     } else if (file.fieldname === 'invoice') {
-      folder += 'documents/invoices';
+      sub = 'documents/invoices';
     } else if (file.fieldname === 'report') {
-      folder += 'reports';
-    } else {
-      folder += 'documents';
+      sub = 'reports';
     }
-    
-    cb(null, folder);
+
+    const dest = path.join(config.UPLOAD_DIR, sub);
+    if (!fs.existsSync(dest)) {
+      fs.mkdirSync(dest, { recursive: true });
+    }
+    cb(null, dest);
   },
   filename: (req, file, cb) => {
     const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);

@@ -6,6 +6,7 @@ const { prisma } = require('../config/database');
 const { authenticate, authorize } = require('../middleware/auth');
 const { AppError } = require('../middleware/errorHandler');
 const bcrypt = require('bcryptjs');
+const config = require('../config');
 
 const router = express.Router();
 
@@ -62,7 +63,7 @@ router.post('/upload-profile-picture', authenticate, async (req, res, next) => {
     if (!base64) return res.status(400).json({ success: false, message: 'No image data provided' });
     const ext = mimeType === 'image/png' ? '.png' : '.jpg';
     const filename = `profile_image-${Date.now()}-${Math.round(Math.random() * 1e9)}${ext}`;
-    const dir = path.join(process.cwd(), 'uploads', 'images', 'profiles');
+    const dir = path.join(config.UPLOAD_DIR, 'images', 'profiles');
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(path.join(dir, filename), Buffer.from(base64, 'base64'));
     const imageUrl = `/uploads/images/profiles/${filename}`;

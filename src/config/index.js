@@ -1,4 +1,5 @@
 const dotenv = require('dotenv');
+const path = require('path');
 
 // Load environment variables
 dotenv.config();
@@ -76,7 +77,7 @@ const config = {
   ALLOWED_FILE_TYPES: process.env.ALLOWED_FILE_TYPES 
     ? process.env.ALLOWED_FILE_TYPES.split(',') 
     : ['image/jpeg', 'image/png', 'image/jpg', 'application/pdf'],
-  UPLOAD_DIR: process.env.UPLOAD_DIR || './uploads',
+  UPLOAD_DIR: process.env.UPLOAD_DIR || path.resolve(__dirname, '../../uploads'),
   
   // Rate Limiting
   RATE_LIMIT_WINDOW_MS: parseInt(process.env.RATE_LIMIT_WINDOW_MS, 10) || 900000, // 15 minutes

@@ -9,6 +9,8 @@ const dotenv = require('dotenv');
 // Load environment variables
 dotenv.config();
 
+const config = require('./config');
+
 // Import middleware
 const { errorHandler } = require('./middleware/errorHandler');
 const logger = require('./utils/logger');
@@ -67,7 +69,7 @@ app.use(cors({
 }));
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
-app.use('/uploads', express.static('uploads'));
+app.use('/uploads', express.static(config.UPLOAD_DIR));
 
 // ASL Bug Monitor — capture 5xx responses (even those handled inside routes)
 app.use(bugMonitor.responseStatusMonitor());
