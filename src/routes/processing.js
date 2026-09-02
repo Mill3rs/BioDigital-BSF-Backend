@@ -396,7 +396,8 @@ router.patch('/batches/:id/finalize', authenticate, authorize('MANAGER', 'ADMIN'
 
 // Add waste to batch
 router.post('/batches/:id/add-waste', authenticate, authorize('MANAGER', 'ADMIN'), [
-  body('wasteRecordIds').isArray().withMessage('wasteRecordIds must be an array')
+  body('wasteRecordIds').isArray().withMessage('wasteRecordIds must be an array'),
+  body('amounts').optional().isObject().withMessage('amounts must be an object of wasteRecordId → kg')
 ], async (req, res, next) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
@@ -479,15 +480,60 @@ router.post('/batches/:id/add-waste', authenticate, authorize('MANAGER', 'ADMIN'
         (r.processedQuantity ?? 0) < r.quantity - 1e-9,
     );
 
-    // Validate: batch quantity must not exceed the TOTAL remaining quantity of the selected records
-    const totalRemaining =
-      freeRecords.reduce((s, r) => s + (r.quantity - (r.processedQuantity ?? 0)), 0) +
-      claimedWithLeftover.reduce((s, r) => s + (r.quantity - (r.processedQuantity ?? 0)), 0);
-    if (batchWithQty.quantity > totalRemaining) {
-      return res.status(422).json({
-        success: false,
-        message: `The batch quantity (${batchWithQty.quantity.toFixed(2)} kg) exceeds the available waste quantity (${totalRemaining.toFixed(2)} kg). Please reduce the batch quantity or select more waste records.`
+    // Per-source amounts (optional) — lets the caller say exactly how many kg
+    // to take from EACH selected waste record instead of consuming the batch
+    // quantity FIFO. Every selected record must carry a positive amount that
+    // does not exceed its remaining quantity, and the amounts must add up to
+    // the batch quantity.
+    const amountsBody =
+      req.body.amounts && typeof req.body.amounts === 'object' && !Array.isArray(req.body.amounts)
+        ? req.body.amounts
+        : null;
+    const amountById =
+      amountsBody && Object.keys(amountsBody).length > 0
+        ? new Map(Object.entries(amountsBody).map(([k, v]) => [k, Number.parseFloat(v)]))
+        : null;
+
+    const remainingById = new Map(
+      wasteRecords.map((r) => [r.id, r.quantity - (r.processedQuantity ?? 0)]),
+    );
+
+    if (amountById) {
+      const hasValidAmounts = wasteRecords.every((r) => {
+        const v = amountById.get(r.id);
+        return (
+          amountById.size === uniqueIds.length &&
+          typeof v === 'number' &&
+          Number.isFinite(v) &&
+          v > 0 &&
+          v <= (remainingById.get(r.id) ?? 0) + 1e-9
+        );
       });
+      if (!hasValidAmounts) {
+        return res.status(422).json({
+          success: false,
+          message:
+            'Every selected waste record must have a positive amount (kg) that does not exceed its remaining quantity.',
+        });
+      }
+      const sumAmounts = wasteRecords.reduce((s, r) => s + (amountById.get(r.id) ?? 0), 0);
+      if (Math.abs(sumAmounts - batchWithQty.quantity) > 0.01) {
+        return res.status(422).json({
+          success: false,
+          message: `The per-source amounts (${sumAmounts.toFixed(2)} kg) must add up to the batch quantity (${batchWithQty.quantity.toFixed(2)} kg).`,
+        });
+      }
+    } else {
+      // Validate: batch quantity must not exceed the TOTAL remaining quantity of the selected records
+      const totalRemaining =
+        freeRecords.reduce((s, r) => s + (r.quantity - (r.processedQuantity ?? 0)), 0) +
+        claimedWithLeftover.reduce((s, r) => s + (r.quantity - (r.processedQuantity ?? 0)), 0);
+      if (batchWithQty.quantity > totalRemaining) {
+        return res.status(422).json({
+          success: false,
+          message: `The batch quantity (${batchWithQty.quantity.toFixed(2)} kg) exceeds the available waste quantity (${totalRemaining.toFixed(2)} kg). Please reduce the batch quantity or select more waste records.`
+        });
+      }
     }
 
     // Run everything in a transaction
@@ -496,6 +542,7 @@ router.post('/batches/:id/add-waste', authenticate, authorize('MANAGER', 'ADMIN'
       // record inherits supplier/farm attribution so per-supplier/per-farm
       // totals stay correct once the original record is shrunk below.
       const splits = [];
+      const splitSourceOf = new Map(); // split record id → original record id
       for (const r of claimedWithLeftover) {
         const leftover = r.quantity - (r.processedQuantity ?? 0);
         const split = await tx.wasteRecord.create({
@@ -517,6 +564,7 @@ router.post('/batches/:id/add-waste', authenticate, authorize('MANAGER', 'ADMIN'
           },
         });
         splits.push(split);
+        splitSourceOf.set(split.id, r.id);
 
         // The leftover now lives in the split record — shrink the original to
         // its consumed amount and mark it fully processed, so it stops showing
@@ -551,27 +599,54 @@ router.post('/batches/:id/add-waste', authenticate, authorize('MANAGER', 'ADMIN'
         include: { wasteRecords: true }
       });
 
-      // Distribute the batch quantity across the selected records — consume
-      // each record's remaining quantity until the batch quantity is filled.
-      let toConsume = batchWithQty.quantity;
-      for (const record of allRecords) {
-        if (toConsume <= 0) break;
-        const alreadyProcessed = record.processedQuantity ?? 0;
-        const remaining = record.quantity - alreadyProcessed;
-        const consume = Math.min(remaining, toConsume);
-        const newProcessed = alreadyProcessed + consume;
-        const isExhausted = newProcessed >= record.quantity - 1e-9;
+      if (amountById) {
+        // Per-source amounts: consume the exact user-entered amount from each
+        // record. A split record consumes the amount entered for the original
+        // record it was split from; the rest of its leftover stays linked to
+        // this batch (PROCESSING) so it remains visible in the available pool.
+        for (const record of allRecords) {
+          const originalId = splitSourceOf.get(record.id) ?? record.id;
+          const amount = amountById.get(originalId) ?? 0;
+          if (!(amount > 0)) continue;
+          const alreadyProcessed = record.processedQuantity ?? 0;
+          const remaining = record.quantity - alreadyProcessed;
+          const consume = Math.min(remaining, amount);
+          const newProcessed = alreadyProcessed + consume;
+          const isExhausted = newProcessed >= record.quantity - 1e-9;
 
-        await tx.wasteRecord.update({
-          where: { id: record.id },
-          data: {
-            processedQuantity: isExhausted ? record.quantity : newProcessed,
-            processingBatchId: id,
-            status: isExhausted ? 'PROCESSED' : 'PROCESSING',
-            ...(isExhausted ? { processingDate: new Date() } : {})
-          }
-        });
-        toConsume -= consume;
+          await tx.wasteRecord.update({
+            where: { id: record.id },
+            data: {
+              processedQuantity: isExhausted ? record.quantity : newProcessed,
+              processingBatchId: id,
+              status: isExhausted ? 'PROCESSED' : 'PROCESSING',
+              ...(isExhausted ? { processingDate: new Date() } : {})
+            }
+          });
+        }
+      } else {
+        // Distribute the batch quantity across the selected records — consume
+        // each record's remaining quantity until the batch quantity is filled.
+        let toConsume = batchWithQty.quantity;
+        for (const record of allRecords) {
+          if (toConsume <= 0) break;
+          const alreadyProcessed = record.processedQuantity ?? 0;
+          const remaining = record.quantity - alreadyProcessed;
+          const consume = Math.min(remaining, toConsume);
+          const newProcessed = alreadyProcessed + consume;
+          const isExhausted = newProcessed >= record.quantity - 1e-9;
+
+          await tx.wasteRecord.update({
+            where: { id: record.id },
+            data: {
+              processedQuantity: isExhausted ? record.quantity : newProcessed,
+              processingBatchId: id,
+              status: isExhausted ? 'PROCESSED' : 'PROCESSING',
+              ...(isExhausted ? { processingDate: new Date() } : {})
+            }
+          });
+          toConsume -= consume;
+        }
       }
 
       return updated;
