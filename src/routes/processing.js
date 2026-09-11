@@ -590,15 +590,12 @@ router.post('/batches/:id/add-waste', authenticate, authorize('MANAGER', 'ADMIN'
         return new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
       });
 
-      // Connect waste records to the batch
-      const updated = await tx.processingBatch.update({
-        where: { id },
-        data: {
-          wasteRecords: { connect: allRecords.map(w => ({ id: w.id })) }
-        },
-        include: { wasteRecords: true }
-      });
-
+      // NOTE: records are linked to this batch only as they actually consume
+      // quantity (the FK is set inside the loops below). Connecting every
+      // selected record up-front would leave records that the FIFO fill skips
+      // (or that carry a 0 per-source amount) linked to the batch with
+      // processedQuantity = 0 — so they would keep showing up as "available"
+      // even though they are already listed as a source of this batch.
       if (amountById) {
         // Per-source amounts: consume the exact user-entered amount from each
         // record. A split record consumes the amount entered for the original
@@ -649,6 +646,12 @@ router.post('/batches/:id/add-waste', authenticate, authorize('MANAGER', 'ADMIN'
         }
       }
 
+      // Re-read so the returned batch reflects exactly the records that were
+      // actually consumed (and therefore linked).
+      const updated = await tx.processingBatch.findUnique({
+        where: { id },
+        include: { wasteRecords: true },
+      });
       return updated;
     });
 
