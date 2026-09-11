@@ -1091,6 +1091,7 @@ router.post('/batches/:id/advance-stage',
     body('temperature').optional({ nullable: true }).isFloat({ min: -50, max: 80 }),
     body('humidity').optional({ nullable: true }).isFloat({ min: 0, max: 100 }),
     body('weightOfHatchedEggs').optional({ nullable: true }).isFloat({ min: 0 }),
+    body('feedUsed').optional({ nullable: true }).isFloat({ min: 0 }),
     // Hatch rate is weight-derived (hatched weight ÷ initial weight); it can
     // legitimately exceed 100 and must not block the stage transition.
     body('hatchRate').optional({ nullable: true }).isFloat({ min: 0 }),
@@ -1119,7 +1120,7 @@ router.post('/batches/:id/advance-stage',
         // Stage 1
         cageId, timeCollected, eggClutches, initialWeight, condition,
         // Stage 2
-        startDate, temperature, humidity, weightOfHatchedEggs, hatchRate,
+        startDate, temperature, humidity, weightOfHatchedEggs, feedUsed, hatchRate,
         // Stage 3
         trayId, trayIds, trayAllocations, feedBatchId, feedAdded, larvaeCondition,
         // Stage 4
@@ -1186,6 +1187,7 @@ router.post('/batches/:id/advance-stage',
         stageMeta.temperature = toF(temperature);
         stageMeta.humidity = toF(humidity);
         stageMeta.weightOfHatchedEggs = toF(weightOfHatchedEggs);
+        stageMeta.feedUsed = toF(feedUsed);
         stageMeta.hatchRate = toF(hatchRate);
 
         // ── Auto-create Larvae Batch ─────────────────────────────────
