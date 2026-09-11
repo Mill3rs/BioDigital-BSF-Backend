@@ -16,7 +16,10 @@ let io = null;
 const initializeSocket = (server) => {
   io = new Server(server, {
     cors: {
-      origin: config.CORS_ORIGINS,
+      // Dev servers bind arbitrary ports/hosts (Vite 5173+, 127.0.0.1, ...);
+      // reflect any origin outside production. In production only the
+      // configured web/API origins are allowed.
+      origin: process.env.NODE_ENV !== 'production' ? true : config.CORS_ORIGINS,
       credentials: true,
       methods: ['GET', 'POST']
     },

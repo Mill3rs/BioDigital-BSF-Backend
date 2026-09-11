@@ -73,14 +73,17 @@ const allowedOrigins = new Set([
   'https://app.biodigitaltechltd.com',
   'https://biodigitaltechltd.com',
   'https://www.biodigitaltechltd.com',
-  'http://localhost:5173',
-  'http://localhost:3000',
-  'http://localhost:3001',
 ]);
+// Dev servers (Vite/Expo) bind arbitrary ports and may be reached via 127.0.0.1.
+const isLocalDevOrigin = (origin) =>
+  /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin);
 app.use(cors({
   origin: (origin, callback) => {
     // No Origin header: native apps, curl, same-origin requests.
     if (!origin) return callback(null, true);
+    // Outside production, never block a dev server on any host/port.
+    if (process.env.NODE_ENV !== 'production') return callback(null, true);
+    if (isLocalDevOrigin(origin)) return callback(null, true);
     if (allowedOrigins.has(origin)) return callback(null, true);
     // Any biodigitaltechltd.com subdomain (www, staging, api, ...).
     if (/^https:\/\/([a-z0-9-]+\.)*biodigitaltechltd\.com$/i.test(origin)) {
@@ -93,6 +96,13 @@ app.use(cors({
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
 }));
+// Make shared/browser caches key on the request Origin, and stop them storing
+// API responses, so a stale (pre-fix) entry can't keep failing CORS checks.
+app.use((req, res, next) => {
+  res.vary('Origin');
+  if (req.path.startsWith('/api')) res.set('Cache-Control', 'no-store');
+  next();
+});
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 app.use('/uploads', express.static(config.UPLOAD_DIR));
