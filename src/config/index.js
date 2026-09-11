@@ -20,6 +20,7 @@ const config = {
   // Database
   DATABASE_URL: process.env.DATABASE_URL,
   DATABASE_MAX_CONNECTIONS: parseInt(process.env.DATABASE_MAX_CONNECTIONS, 10) || 20,
+  DATABASE_POOL_TIMEOUT: parseInt(process.env.DATABASE_POOL_TIMEOUT, 10) || 15, // seconds to wait for a pooled connection
   DATABASE_IDLE_TIMEOUT: parseInt(process.env.DATABASE_IDLE_TIMEOUT, 10) || 30000,
   DATABASE_CONNECTION_TIMEOUT: parseInt(process.env.DATABASE_CONNECTION_TIMEOUT, 10) || 2000,
   

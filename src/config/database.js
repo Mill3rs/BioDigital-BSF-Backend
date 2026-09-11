@@ -61,8 +61,14 @@ if (dbConfig.url) {
     'connection_limit',
     Math.max(Number(dbConfig.connectionLimit) || 20, 1),
   );
-  // Seconds: wait at most 5s for a pooled connection before erroring
-  dbConfig.url = withUrlParam(dbConfig.url, 'pool_timeout', 5);
+  // Seconds: wait for a pooled connection before erroring. Kept comfortably
+  // above the pooler's typical latency so brief contention (e.g. many parallel
+  // queries in one request) waits instead of throwing P2024.
+  dbConfig.url = withUrlParam(
+    dbConfig.url,
+    'pool_timeout',
+    Math.max(Number(config.DATABASE_POOL_TIMEOUT) || 15, 1),
+  );
   // Seconds: fail a DB call after 15s instead of hanging the request
   dbConfig.url = withUrlParam(dbConfig.url, 'socket_timeout', 15);
 }

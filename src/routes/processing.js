@@ -1028,15 +1028,16 @@ router.get('/batches/:id/larvae-batch', authenticate, async (req, res, next) => 
       return res.status(404).json({ success: false, message: 'Batch not found' });
     }
 
-    // Find the larvae batch creation log
+    // Find the larvae batch creation / harvest logs. Prisma's JSON filter has
+    // no `in` operator for a path value, so match each type explicitly.
     const larvaeLogs = await prisma.activityLog.findMany({
       where: {
         batchId: id,
         action: 'NOTE_ADDED',
-        metadata: {
-          path: ['type'],
-          in: ['LARVAE_BATCH_CREATED', 'LARVAE_BATCH_HARVESTED'],
-        },
+        OR: [
+          { metadata: { path: ['type'], equals: 'LARVAE_BATCH_CREATED' } },
+          { metadata: { path: ['type'], equals: 'LARVAE_BATCH_HARVESTED' } },
+        ],
       },
       orderBy: { timestamp: 'asc' },
     });
