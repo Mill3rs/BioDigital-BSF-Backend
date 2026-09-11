@@ -1091,7 +1091,9 @@ router.post('/batches/:id/advance-stage',
     body('temperature').optional({ nullable: true }).isFloat({ min: -50, max: 80 }),
     body('humidity').optional({ nullable: true }).isFloat({ min: 0, max: 100 }),
     body('weightOfHatchedEggs').optional({ nullable: true }).isFloat({ min: 0 }),
-    body('hatchRate').optional({ nullable: true }).isFloat({ min: 0, max: 100 }),
+    // Hatch rate is weight-derived (hatched weight ÷ initial weight); it can
+    // legitimately exceed 100 and must not block the stage transition.
+    body('hatchRate').optional({ nullable: true }).isFloat({ min: 0 }),
     // Stage 3: Larvae Rearing (Larviculture)
     body('trayId').optional().isString(),
     body('trayIds').optional().isArray().withMessage('trayIds must be an array'),
