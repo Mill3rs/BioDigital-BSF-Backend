@@ -13,9 +13,23 @@ const config = {
   CLIENT_URL: process.env.CLIENT_URL || 'http://localhost:3001',
   
   // CORS
-  CORS_ORIGINS: process.env.CORS_ORIGINS 
-    ? process.env.CORS_ORIGINS.split(',') 
-    : ['http://localhost:3000', 'http://localhost:3001', 'http://localhost:8080'],
+  // Merge anything from CORS_ORIGINS with the known web/mobile origins so a
+  // stale or partial value (Hostinger rewrites config/.env on redeploys) can
+  // never drop the web app origin. Used by Socket.IO as well as HTTP routes.
+  CORS_ORIGINS: (() => {
+    const fromEnv = process.env.CORS_ORIGINS
+      ? process.env.CORS_ORIGINS.split(',').map((o) => o.trim()).filter(Boolean)
+      : [];
+    const productionDefaults = [
+      'https://app.biodigitaltechltd.com',
+      'https://biodigitaltechltd.com',
+      'https://www.biodigitaltechltd.com',
+      'https://api.biodigitaltechltd.com',
+    ];
+    const devDefaults = ['http://localhost:3000', 'http://localhost:3001', 'http://localhost:5173'];
+    const defaults = process.env.NODE_ENV === 'production' ? productionDefaults : devDefaults;
+    return [...new Set([...fromEnv, ...defaults])];
+  })(),
   
   // Database
   DATABASE_URL: process.env.DATABASE_URL,

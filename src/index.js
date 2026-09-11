@@ -59,10 +59,36 @@ app.use(helmet({
   },
 }));
 app.use(compression());
+// The web app (app.biodigitaltechltd.com) and the mobile app call this API
+// cross-origin, so their origins must be reflected or the browser blocks the
+// request: simple GETs report a missing Access-Control-Allow-Origin header,
+// while POSTs fail the preflight with a null status. A literal '*' must never
+// be combined with credentials: true, so only allow-listed origins are echoed.
+const envOrigins = (process.env.CORS_ORIGINS || '')
+  .split(',')
+  .map((o) => o.trim())
+  .filter(Boolean);
+const allowedOrigins = new Set([
+  ...envOrigins,
+  'https://app.biodigitaltechltd.com',
+  'https://biodigitaltechltd.com',
+  'https://www.biodigitaltechltd.com',
+  'http://localhost:5173',
+  'http://localhost:3000',
+  'http://localhost:3001',
+]);
 app.use(cors({
-  origin: process.env.NODE_ENV !== 'production'
-    ? true // dev: reflect any origin (Vite/webpack dev servers work with no config)
-    : (process.env.CORS_ORIGINS ? process.env.CORS_ORIGINS.split(',') : '*'),
+  origin: (origin, callback) => {
+    // No Origin header: native apps, curl, same-origin requests.
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.has(origin)) return callback(null, true);
+    // Any biodigitaltechltd.com subdomain (www, staging, api, ...).
+    if (/^https:\/\/([a-z0-9-]+\.)*biodigitaltechltd\.com$/i.test(origin)) {
+      return callback(null, true);
+    }
+    // Omit the header for unknown origins instead of erroring the request.
+    return callback(null, false);
+  },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
@@ -144,7 +170,7 @@ initializeSocket(server);
 bugMonitor.init({
   endpoint: process.env.BUGMONITOR_URL || 'https://aslbugmonitor.agricconnect.org',
   app: 'biodigital-bsf-farm',
-  environment: process.env.NODE_ENV || 'production',
+  environment: process.env.NODE_ENV || 'development',
 });
 
 // 404 handler
