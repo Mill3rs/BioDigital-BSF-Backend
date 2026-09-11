@@ -1,6 +1,10 @@
 generator client {
-  provider      = "prisma-client-js"
-  engineType    = "binary"
+  provider = "prisma-client-js"
+  // Use the in-process "library" engine (Prisma's default) instead of the
+  // separate "binary" query-engine process. The production host (Hostinger
+  // shared) has a tight process/cgroup limit and failed to spawn the binary
+  // query engine with `EAGAIN` under load, which took the API down. The
+  // library engine loads a shared object in-process and spawns no child.
   binaryTargets = ["native", "debian-openssl-1.1.x"]
 }
 
