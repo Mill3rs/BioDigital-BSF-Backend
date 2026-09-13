@@ -1106,6 +1106,7 @@ router.post('/batches/:id/advance-stage',
     body('feedBatchId').optional().isString(),
     body('feedAdded').optional({ nullable: true }).isFloat({ min: 0 }),
     body('larvaeCondition').optional().isString(),
+    body('hatchedWeightG').optional({ nullable: true }).isFloat({ min: 0 }),
     // Stage 4: Harvesting & Separation
     body('larvaeHarvested').optional({ nullable: true }).isFloat({ min: 0 }),
     body('frassCollected').optional({ nullable: true }).isFloat({ min: 0 }),
@@ -1128,6 +1129,7 @@ router.post('/batches/:id/advance-stage',
         startDate, temperature, humidity, weightOfHatchedEggs, feedUsed, hatchRate,
         // Stage 3
         trayId, trayIds, trayAllocations, feedBatchId, feedAdded, larvaeCondition,
+        hatchedWeightG,
         // Stage 4
         larvaeHarvested, frassCollected, residue, qualityGrade, actualWeight,
       } = req.body;
@@ -1255,6 +1257,9 @@ router.post('/batches/:id/advance-stage',
         stageMeta.temperature = toF(temperature);
         stageMeta.humidity = toF(humidity);
         stageMeta.larvaeCondition = larvaeCondition || null;
+        // Weight of Hatched Eggs used as the LC batch basis for this rearing
+        // stage (carried over from Stage 2, adjustable on the Stage 3 form).
+        stageMeta.hatchedWeightG = toF(hatchedWeightG);
 
         // Resolve the Feed Source to its batch number so the activity log
         // shows "WB-…" instead of the raw record id.
