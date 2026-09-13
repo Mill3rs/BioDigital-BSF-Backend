@@ -1064,6 +1064,7 @@ router.get('/batches/:id/larvae-batch', authenticate, async (req, res, next) => 
         frassCollected: harvestLog?.metadata?.frassCollected ?? null,
         residue: harvestLog?.metadata?.residue ?? null,
         qualityGrade: harvestLog?.metadata?.qualityGrade ?? null,
+        actualWeight: harvestLog?.metadata?.actualWeight ?? null,
         harvestedAt: harvestLog?.timestamp ?? null,
       },
     });
@@ -1110,6 +1111,7 @@ router.post('/batches/:id/advance-stage',
     body('frassCollected').optional({ nullable: true }).isFloat({ min: 0 }),
     body('residue').optional({ nullable: true }).isFloat({ min: 0 }),
     body('qualityGrade').optional().isString(),
+    body('actualWeight').optional({ nullable: true }).isFloat({ min: 0 }),
   ],
   async (req, res, next) => {
     const errors = validationResult(req);
@@ -1127,7 +1129,7 @@ router.post('/batches/:id/advance-stage',
         // Stage 3
         trayId, trayIds, trayAllocations, feedBatchId, feedAdded, larvaeCondition,
         // Stage 4
-        larvaeHarvested, frassCollected, residue, qualityGrade,
+        larvaeHarvested, frassCollected, residue, qualityGrade, actualWeight,
       } = req.body;
 
       const batch = await assertBatchIsActive(id);
@@ -1288,6 +1290,7 @@ router.post('/batches/:id/advance-stage',
         stageMeta.frassCollected = toF(frassCollected);
         stageMeta.residue = toF(residue);
         stageMeta.qualityGrade = qualityGrade || null;
+        stageMeta.actualWeight = toF(actualWeight);
 
         // ── Update Larvae Batch with harvest data ─────────────────────
         if (toF(larvaeHarvested) || toF(frassCollected)) {
@@ -1304,6 +1307,7 @@ router.post('/batches/:id/advance-stage',
                 frassCollected:    toF(frassCollected),
                 residue:           toF(residue),
                 qualityGrade:      qualityGrade || null,
+                actualWeight:      toF(actualWeight),
               },
             },
           });

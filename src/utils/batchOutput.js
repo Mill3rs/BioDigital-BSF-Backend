@@ -29,6 +29,7 @@ function extractHarvest(activityLogs) {
     harvestRecycled:  m.harvestRecycled  ?? null,
     harvestTotalKg:   m.harvestTotalKg   ?? null,
     stageWeight:      m.stageWeight      ?? null,
+    actualWeight:     m.actualWeight     ?? null,
   };
 }
 
