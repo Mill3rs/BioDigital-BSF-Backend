@@ -30,6 +30,9 @@ function extractHarvest(activityLogs) {
     harvestTotalKg:   m.harvestTotalKg   ?? null,
     stageWeight:      m.stageWeight      ?? null,
     actualWeight:     m.actualWeight     ?? null,
+    // Raw Stage 4 form fields (the harvest* keys above are the legacy aliases).
+    larvaeHarvested:  m.larvaeHarvested  ?? null,
+    residue:          m.residue          ?? null,
   };
 }
 
@@ -138,9 +141,76 @@ function summarizeBatchOutputs(batches) {
   };
 }
 
+/**
+ * Aggregate PRODUCT_ALLOCATION logs — amounts of a batch consumed by catalogue
+ * products created from the Products page. Each record deducts from the
+ * batch's remaining output.
+ */
+function aggregateAllocations(activityLogs) {
+  const records = [];
+  const byProduct = {};
+  let totalKg = 0;
+  for (const l of activityLogs) {
+    if (l.action !== 'NOTE_ADDED' || l.metadata?.type !== 'PRODUCT_ALLOCATION') continue;
+    const m = l.metadata;
+    const kg = Number(m.quantityKg) || 0;
+    if (kg <= 0) continue;
+    totalKg += kg;
+    const name = m.productName ?? 'Product';
+    byProduct[name] = (byProduct[name] ?? 0) + kg;
+    records.push({
+      id:          l.id,
+      productId:   m.productId   ?? null,
+      productName: name,
+      quantityKg:  kg,
+      recordedBy:  l.performedBy?.fullName ?? null,
+      recordedAt:  l.timestamp,
+    });
+  }
+  const round = (n) => Math.round(n * 100) / 100;
+  return { totalKg: round(totalKg), byProduct, records };
+}
+
+/** Total positive product-level weight recorded for a batch. */
+function sumAvailableKg(harvest, output) {
+  const rows = [
+    harvest?.harvestFrass     ?? output?.frassFertilizerKg,
+    harvest?.harvestPrepupae  ?? output?.prepupaeWeight,
+    harvest?.harvestBsfLarvae ?? output?.bsfLarvaeKg,
+    output?.bsfMealKg,
+    output?.bsfOilKg,
+    harvest?.harvestRecycled  ?? output?.recycledLarvaeKg,
+  ];
+  return rows.reduce((s, v) => s + (Number(v) > 0 ? Number(v) : 0), 0);
+}
+
+/**
+ * Availability summary for a batch: recorded output minus what has been bagged
+ * and minus what has been allocated to catalogue products.
+ */
+function batchOutputSummary(batch) {
+  const harvest = extractHarvest(batch.activityLogs ?? []);
+  const output  = extractOutput(batch.activityLogs ?? []);
+  const bagging = aggregateBagging(batch.activityLogs ?? []);
+  const allocation = aggregateAllocations(batch.activityLogs ?? []);
+
+  const availableKg = sumAvailableKg(harvest, output);
+  const baggedKg = Object.values(bagging).reduce((s, d) => s + (d.baggedKg ?? 0), 0);
+  const round = (n) => Math.round(n * 100) / 100;
+
+  return {
+    availableKg: round(availableKg),
+    baggedKg:    round(baggedKg),
+    allocatedKg: allocation.totalKg,
+    remainingKg: round(Math.max(0, availableKg - baggedKg - allocation.totalKg)),
+  };
+}
+
 module.exports = {
   extractHarvest,
   extractOutput,
   aggregateBagging,
+  aggregateAllocations,
+  batchOutputSummary,
   summarizeBatchOutputs,
 };

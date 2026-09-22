@@ -5,6 +5,7 @@ const path = require('path');
 const { prisma } = require('../config/database');
 const { authenticate, authorize } = require('../middleware/auth');
 const { AppError } = require('../middleware/errorHandler');
+const { sumKilograms } = require('../utils/helpers');
 const bcrypt = require('bcryptjs');
 const config = require('../config');
 
@@ -25,6 +26,23 @@ router.get('/profile', authenticate, async (req, res, next) => {
     });
     
     const { password, ...userData } = user;
+
+    // Report the supplier's supplied total live, in kg. The stored
+    // SupplierProfile.totalWasteSupplied counter sums raw quantities across
+    // mixed units (kg, tons, litres, crates, sacks) and can drift, so it is not
+    // a reliable source for a kg figure.
+    if (userData.supplierProfile) {
+      const suppliedByUnit = await prisma.wasteRecord.groupBy({
+        by: ['unit'],
+        where: { supplierId: req.user.id, deletedAt: null },
+        _sum: { quantity: true }
+      });
+      userData.supplierProfile = {
+        ...userData.supplierProfile,
+        totalKgSupplied: sumKilograms(suppliedByUnit)
+      };
+    }
+
     res.json({ success: true, data: userData });
   } catch (error) {
     next(error);

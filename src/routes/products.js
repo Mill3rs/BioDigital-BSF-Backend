@@ -3,7 +3,8 @@ const { body, validationResult } = require('express-validator');
 const { prisma } = require('../config/database');
 const { authenticate, authorize } = require('../middleware/auth');
 const { AppError } = require('../middleware/errorHandler');
-const { uploadMultiple } = require('../middleware/upload');
+const { uploadMultiple, toUploadPath } = require('../middleware/upload');
+const { batchOutputSummary, extractHarvest } = require('../utils/batchOutput');
 
 const router = express.Router();
 
@@ -122,11 +123,12 @@ router.get('/', authenticate, async (req, res, next) => {
 // Create product
 router.post('/', authenticate, authorize('MANAGER', 'ADMIN'), [
   body('name').notEmpty().withMessage('Product name is required'),
-  body('category').isIn(['ORGANIC_FERTILIZER', 'PROTEIN_FEED', 'INSECT_OIL', 'SOIL_CONDITIONER', 'DRIED_LARVAE', 'COMPOST', 'LIQUID_FERTILIZER', 'BIOCHAR', 'OTHER']),
+  body('category').isIn(['ORGANIC_FERTILIZER', 'PROTEIN_FEED', 'INSECT_OIL', 'SOIL_CONDITIONER', 'FRESH_LARVAE', 'DRIED_LARVAE', 'COMPOST', 'LIQUID_FERTILIZER', 'BIOCHAR', 'OTHER']),
   body('variants').isArray().withMessage('At least one variant is required'),
   body('variants.*.name').notEmpty(),
   body('variants.*.quantity').isInt({ min: 0 }),
-  body('variants.*.price').isFloat({ min: 0 })
+  body('variants.*.price').isFloat({ min: 0 }),
+  body('batchAllocations').optional().isArray().withMessage('batchAllocations must be an array')
 ], async (req, res, next) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
@@ -144,7 +146,61 @@ router.post('/', authenticate, authorize('MANAGER', 'ADMIN'), [
       farmId,
       variants
     } = req.body;
-    
+
+    // ── Source batches (from Post-Processing) ─────────────────────────────────
+    // A product can be drawn from one or more completed batches. Each selected
+    // batch is validated against its remaining output; the used amount is then
+    // recorded as a PRODUCT_ALLOCATION entry so it deducts from the batch.
+    const batchAllocations = Array.isArray(req.body.batchAllocations)
+      ? req.body.batchAllocations
+      : [];
+    const resolvedAllocations = [];
+
+    for (const entry of batchAllocations) {
+      const batchId = typeof entry?.batchId === 'string' ? entry.batchId : null;
+      const quantityKg = Number(entry?.quantityKg) || 0;
+      if (!batchId || quantityKg <= 0) continue;
+
+      // ADMIN/MANAGER may only draw from batches their company owns.
+      if (req.user.adminId) {
+        const owns = await prisma.processingBatch.count({
+          where: {
+            id: batchId,
+            OR: [
+              { farm:      { adminId: req.user.adminId } },
+              { createdBy: { managedById: req.user.adminId } },
+            ],
+          },
+        });
+        if (!owns) throw new AppError('Batch not found or access denied', 403);
+      }
+
+      const sourceBatch = await prisma.processingBatch.findUnique({
+        where: { id: batchId },
+        select: {
+          id: true,
+          batchNumber: true,
+          status: true,
+          activityLogs: { orderBy: { timestamp: 'desc' }, take: 300 },
+        },
+      });
+      if (!sourceBatch) throw new AppError('Batch not found', 404);
+
+      const availability = batchOutputSummary(sourceBatch);
+      if (quantityKg > availability.remainingKg + 0.0001) {
+        throw new AppError(
+          `Batch ${sourceBatch.batchNumber} only has ${availability.remainingKg} kg remaining`,
+          400
+        );
+      }
+
+      resolvedAllocations.push({
+        batchId:      sourceBatch.id,
+        batchNumber:  sourceBatch.batchNumber,
+        quantityKg,
+      });
+    }
+
     const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-');
 
     // ADMIN/MANAGER may only attach the product to a farm their company owns.
@@ -163,7 +219,10 @@ router.post('/', authenticate, authorize('MANAGER', 'ADMIN'), [
         shortDescription,
         category,
         images: images || [],
-        tags: tags || [],
+        tags: [
+          ...(tags || []),
+          ...resolvedAllocations.map((a) => a.batchNumber),
+        ],
         slug,
         farmId: farmId || req.user.farmId,
         createdById: req.user.id,
@@ -188,11 +247,36 @@ router.post('/', authenticate, authorize('MANAGER', 'ADMIN'), [
       },
       include: { variants: true }
     });
-    
+
+    // Record the allocation against each source batch so the used amount is
+    // deducted from that batch's remaining output in Post-Processing.
+    if (resolvedAllocations.length > 0) {
+      await Promise.all(
+        resolvedAllocations.map((a) =>
+          prisma.activityLog.create({
+            data: {
+              batchId:       a.batchId,
+              action:        'NOTE_ADDED',
+              description:   `${a.quantityKg} kg allocated to product "${name}"`,
+              performedById: req.user.id,
+              metadata: {
+                type:        'PRODUCT_ALLOCATION',
+                productId:   product.id,
+                productName: name,
+                quantityKg:  a.quantityKg,
+                batchNumber: a.batchNumber,
+              },
+            },
+          })
+        )
+      );
+    }
+
     res.status(201).json({
       success: true,
       message: 'Product created successfully',
-      data: product
+      data: product,
+      allocations: resolvedAllocations,
     });
   } catch (error) {
     next(error);
@@ -281,10 +365,11 @@ router.post('/:id/images', authenticate, authorize('MANAGER', 'ADMIN'),
       const product = await prisma.product.findUnique({ where: { id }, select: { id: true, images: true } });
       if (!product) throw new AppError('Product not found', 404);
 
-      const newImageUrls = (req.files || []).map((f) => {
-        const relativePath = f.path.replace(/\\/g, '/');
-        return `${req.protocol}://${req.get('host')}/${relativePath}`;
-      });
+      // Store relative '/uploads/...' paths so they resolve against the API
+      // origin at render time (see resolveImageUrl on the web client).
+      const newImageUrls = (req.files || [])
+        .map((f) => toUploadPath(f.path))
+        .filter(Boolean);
 
       const updated = await prisma.product.update({
         where: { id },
@@ -556,6 +641,7 @@ router.get('/categories/list', authenticate, async (req, res) => {
     { id: 'PROTEIN_FEED', name: 'Protein Feed', icon: '🐓' },
     { id: 'INSECT_OIL', name: 'Insect Oil', icon: '🪲' },
     { id: 'SOIL_CONDITIONER', name: 'Soil Conditioner', icon: '🌍' },
+    { id: 'FRESH_LARVAE', name: 'Fresh Larvae', icon: '🐛' },
     { id: 'DRIED_LARVAE', name: 'Dried Larvae', icon: '🐛' },
     { id: 'COMPOST', name: 'Compost', icon: '🗑️' },
     { id: 'LIQUID_FERTILIZER', name: 'Liquid Fertilizer', icon: '💧' },
@@ -631,16 +717,17 @@ router.get('/:id/traceability', authenticate, async (req, res, next) => {
           }))
           .sort((a, b) => a.stage - b.stage);
 
-        // Extract harvest
-        const harvestLog = batch.activityLogs.find(
-          (l) => l.action === 'NOTE_ADDED' && l.metadata?.type === 'STAGE_TRANSITION' && Number(l.metadata?.stageNumber) === 4,
-        );
-        const harvest = harvestLog ? {
-          bsfLarvaeKg:  harvestLog.metadata.harvestBsfLarvae ?? null,
-          frassKg:      harvestLog.metadata.harvestFrass     ?? null,
-          prepupaeKg:   harvestLog.metadata.harvestPrepupae  ?? null,
-          recycledKg:   harvestLog.metadata.harvestRecycled  ?? null,
-          totalKg:      harvestLog.metadata.harvestTotalKg   ?? null,
+        // Extract harvest. The Stage 4 entry log holds the Larvae Rearing form
+        // data, while the harvest figures live on the log created when the
+        // Harvesting stage is completed — reuse the shared extractor, which
+        // picks the entry that actually carries harvest data.
+        const h = extractHarvest(batch.activityLogs);
+        const harvest = h ? {
+          bsfLarvaeKg: h.harvestBsfLarvae ?? h.larvaeHarvested ?? null,
+          frassKg:     h.harvestFrass     ?? null,
+          prepupaeKg:  h.harvestPrepupae  ?? null,
+          recycledKg:  h.harvestRecycled  ?? null,
+          totalKg:     h.harvestTotalKg   ?? null,
         } : null;
 
         // Extract output
@@ -688,7 +775,86 @@ router.get('/:id/traceability', authenticate, async (req, res, next) => {
           approvedAt:   baggingLogs[0].metadata.approvedAt   ?? null,
         } : null;
 
-        const totalInput = batch.wasteRecords.reduce((s, w) => s + (w.quantity ?? 0), 0);
+        // ── Input (organic waste) ──────────────────────────────────────────
+        // Waste batches link their waste records directly. Lifecycle batches
+        // (LC-) receive waste through the Larvae Rearing (Stage 3) feed form, so
+        // fall back to the recorded feed sources when no waste records are
+        // attached — otherwise the input would show as 0 kg.
+        let inputTotalKg = batch.wasteRecords.reduce((s, w) => s + (w.quantity ?? 0), 0);
+        let inputSources = batch.wasteRecords.map((w) => ({
+          name:        w.sourceName,
+          type:        w.sourceType,
+          qty:         w.quantity,
+          unit:        w.unit,
+          date:        w.date,
+          carbonSaved: w.carbonSaved,
+        }));
+
+        if (inputTotalKg <= 0) {
+          // Newest feed entry wins (activity logs are ordered ascending).
+          const feedLog = [...batch.activityLogs].reverse().find(
+            (l) =>
+              l.action === 'NOTE_ADDED' &&
+              l.metadata &&
+              (l.metadata.feedBatchId || l.metadata.feedBatchNumber || l.metadata.feedSources),
+          );
+
+          if (feedLog) {
+            const rawSources = Array.isArray(feedLog.metadata.feedSources)
+              ? feedLog.metadata.feedSources
+              : [];
+            const feedList = rawSources.length > 0
+              ? rawSources
+                  .map((f) => ({
+                    batchId: f && f.batchId ? String(f.batchId) : null,
+                    name:    f && f.batchNumber ? String(f.batchNumber) : 'Waste batch',
+                    qty:     Number(f && f.quantity) || 0,
+                  }))
+                  .filter((f) => f.qty > 0)
+              : (Number(feedLog.metadata.feedAdded) > 0
+                  ? [{
+                      batchId: feedLog.metadata.feedBatchId
+                        ? String(feedLog.metadata.feedBatchId)
+                        : null,
+                      name:    feedLog.metadata.feedBatchNumber
+                        ? String(feedLog.metadata.feedBatchNumber)
+                        : 'Waste batch',
+                      qty:     Number(feedLog.metadata.feedAdded) || 0,
+                    }]
+                  : []);
+
+            // Best effort: prorate the CO₂ prevented from each source waste
+            // batch onto the amount actually fed from it.
+            const carbonPerKg = new Map();
+            const feedBatchIds = feedList.map((f) => f.batchId).filter(Boolean);
+            if (feedBatchIds.length > 0) {
+              const feedBatches = await prisma.processingBatch.findMany({
+                where: { id: { in: feedBatchIds } },
+                select: {
+                  id: true,
+                  wasteRecords: { select: { quantity: true, carbonSaved: true } },
+                },
+              });
+              for (const fb of feedBatches) {
+                const qty    = fb.wasteRecords.reduce((s, w) => s + (w.quantity ?? 0), 0);
+                const carbon = fb.wasteRecords.reduce((s, w) => s + (w.carbonSaved ?? 0), 0);
+                if (qty > 0 && carbon > 0) carbonPerKg.set(fb.id, carbon / qty);
+              }
+            }
+
+            inputTotalKg = feedList.reduce((s, f) => s + f.qty, 0);
+            inputSources = feedList.map((f) => ({
+              name:        f.name,
+              type:        'FEED_SOURCE',
+              qty:         f.qty,
+              unit:        'kg',
+              date:        feedLog.timestamp,
+              carbonSaved: f.batchId && carbonPerKg.has(f.batchId)
+                ? Math.round(f.qty * carbonPerKg.get(f.batchId) * 100) / 100
+                : null,
+            }));
+          }
+        }
 
         cycle = {
           batchNumber:    batch.batchNumber,
@@ -698,15 +864,8 @@ router.get('/:id/traceability', authenticate, async (req, res, next) => {
           farm:           batch.farm ?? product.farm,
           createdBy:      batch.createdBy?.fullName ?? null,
           input: {
-            totalKg: totalInput,
-            sources:  batch.wasteRecords.map((w) => ({
-              name:       w.sourceName,
-              type:       w.sourceType,
-              qty:        w.quantity,
-              unit:       w.unit,
-              date:       w.date,
-              carbonSaved: w.carbonSaved,
-            })),
+            totalKg: inputTotalKg,
+            sources:  inputSources,
           },
           stages,
           processing: {

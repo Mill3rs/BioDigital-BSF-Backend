@@ -3,6 +3,7 @@ const { body, validationResult } = require('express-validator');
 const { prisma } = require('../config/database');
 const { authenticate, authorize } = require('../middleware/auth');
 const { AppError } = require('../middleware/errorHandler');
+const { sumKilograms } = require('../utils/helpers');
 
 const router = express.Router();
 
@@ -14,7 +15,7 @@ const WASTE_DELIVERED_STATUSES = ['ACKNOWLEDGED', 'PROCESSING', 'PROCESSED'];
 // Get driver profile
 router.get('/profile', authenticate, authorize('DRIVER'), async (req, res, next) => {
   try {
-    const [profile, orderDeliveries, wasteDelivered] = await Promise.all([
+    const [profile, orderDeliveries, wasteDelivered, deliveredByUnit] = await Promise.all([
       prisma.driverProfile.findUnique({
         where: { userId: req.user.id },
         include: {
@@ -28,6 +29,12 @@ router.get('/profile', authenticate, authorize('DRIVER'), async (req, res, next)
       }),
       prisma.wasteRecord.count({
         where: { driverId: req.user.id, status: { in: WASTE_DELIVERED_STATUSES }, deletedAt: null }
+      }),
+      // Grouped by unit so the kg total can convert tons and skip non-mass units.
+      prisma.wasteRecord.groupBy({
+        by: ['unit'],
+        where: { driverId: req.user.id, status: { in: WASTE_DELIVERED_STATUSES }, deletedAt: null },
+        _sum: { quantity: true }
       })
     ]);
     
@@ -42,6 +49,8 @@ router.get('/profile', authenticate, authorize('DRIVER'), async (req, res, next)
         // Deliveries = order deliveries + waste loads delivered to the plant
         totalDeliveries: orderDeliveries + wasteDelivered,
         totalWasteDelivered: wasteDelivered,
+        // Total kg of waste delivered to the plant (mass units only)
+        totalKgDelivered: sumKilograms(deliveredByUnit),
       }
     });
   } catch (error) {

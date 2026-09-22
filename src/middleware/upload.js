@@ -68,7 +68,24 @@ const storage = multer.diskStorage({
 });
 
 // File filter
+//
+// Product images are restricted to the raster formats the Products page offers.
+// Without this, the global ALLOWED_FILE_TYPES list (which also carries
+// application/pdf for document uploads) would let a PDF be stored as a product
+// image.
+const PRODUCT_IMAGE_FIELDS = ['product_image', 'product_images'];
+const PRODUCT_IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/jpg'];
+
 const fileFilter = (req, file, cb) => {
+  if (PRODUCT_IMAGE_FIELDS.includes(file.fieldname)) {
+    if (!PRODUCT_IMAGE_TYPES.includes(file.mimetype)) {
+      cb(new AppError('Invalid image type. Product images must be PNG, JPG or JPEG', 400), false);
+      return;
+    }
+    cb(null, true);
+    return;
+  }
+
   const allowedTypes = config.ALLOWED_FILE_TYPES;
   
   if (allowedTypes.includes(file.mimetype)) {
@@ -148,6 +165,27 @@ const getFileUrl = (req, filename) => {
   return `${baseUrl}/uploads/${filename}`;
 };
 
+// Convert an on-disk upload path into the public path served by the `/uploads`
+// static mount, e.g. '/uploads/images/products/photo.png'.
+//
+// Stored values must stay relative: the web client's `resolveImageUrl()`
+// prefixes the API origin at render time. multer reports `file.path` as an
+// absolute path, so using it directly in a URL would both leak the server's
+// filesystem layout and produce a URL the static mount cannot serve.
+const toUploadPath = (filePath) => {
+  if (!filePath) return null;
+
+  const relative = path.relative(config.UPLOAD_DIR, filePath);
+
+  if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) {
+    // Outside UPLOAD_DIR — never produced by multer, so keep the URL shaped
+    // like a real one while dropping the absolute portion.
+    return `/uploads/${path.basename(filePath)}`;
+  }
+
+  return `/uploads/${relative.split(path.sep).join('/')}`;
+};
+
 // Delete file
 const deleteFile = (filePath) => {
   return new Promise((resolve, reject) => {
@@ -194,6 +232,7 @@ module.exports = {
   uploadMultiple,
   uploadFields,
   getFileUrl,
+  toUploadPath,
   deleteFile,
   cleanupOldFiles
 };

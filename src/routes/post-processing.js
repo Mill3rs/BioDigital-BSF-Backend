@@ -7,6 +7,8 @@ const {
   extractHarvest,
   extractOutput,
   aggregateBagging,
+  aggregateAllocations,
+  batchOutputSummary,
 } = require('../utils/batchOutput');
 
 const router = express.Router();
@@ -70,6 +72,8 @@ function shapeBatch(batch) {
   const harvest = extractHarvest(batch.activityLogs ?? []);
   const output  = extractOutput(batch.activityLogs ?? []);
   const bagging = aggregateBagging(batch.activityLogs ?? []);
+  const allocation = aggregateAllocations(batch.activityLogs ?? []);
+  const availability = batchOutputSummary(batch);
 
   return {
     id:             batch.id,
@@ -87,6 +91,8 @@ function shapeBatch(batch) {
     harvest,
     output,
     bagging,
+    allocation,
+    availability,
   };
 }
 
@@ -172,6 +178,8 @@ router.get('/summary', authenticate, async (req, res, next) => {
       totalOutputKg:  0,
       frassKg:        0,
       prepupaeKg:     0,
+      larvaeHarvestedKg: 0,
+      residueKg:      0,
       bsfLarvaeKg:    0,
       bsfMealKg:      0,
       bsfOilKg:       0,
@@ -190,6 +198,10 @@ router.get('/summary', authenticate, async (req, res, next) => {
 
       totals.frassKg    += harvest?.harvestFrass    ?? output?.frassFertilizerKg ?? 0;
       totals.prepupaeKg += harvest?.harvestPrepupae ?? output?.prepupaeWeight    ?? 0;
+      // Larvae recorded during Harvesting & Separation (falls back to the
+      // End-Batch output), and the residue separated out at the same time.
+      totals.larvaeHarvestedKg += harvest?.larvaeHarvested ?? harvest?.harvestBsfLarvae ?? output?.bsfLarvaeKg ?? 0;
+      totals.residueKg += harvest?.residue ?? 0;
       totals.bsfLarvaeKg += (harvest?.harvestBsfLarvae ?? output?.bsfLarvaeKg   ?? 0);
       totals.bsfMealKg   += output?.bsfMealKg  ?? 0;
       totals.bsfOilKg    += output?.bsfOilKg   ?? 0;
@@ -481,6 +493,10 @@ router.post(
         select: { id: true, batchNumber: true, farmId: true },
       });
 
+      if (!batch) {
+        throw new AppError('Processing batch for this bagging record no longer exists', 404);
+      }
+
       const category = PRODUCT_CATEGORY_MAP[productName] ?? 'OTHER';
       const baseName = `${productName} — Batch ${batch.batchNumber}`;
       const slug = baseName.toLowerCase().replace(/[^a-z0-9]+/g, '-') + '-' + Date.now();
@@ -496,6 +512,10 @@ router.post(
           images:           [],
           tags:             ['BSF', productName, batch.batchNumber],
           farmId:           batch.farmId ?? null,
+          // Ownership link for per-company isolation. Batches created without a
+          // farm (farmId === null) would otherwise leave the product invisible
+          // to the owning company in GET /api/products.
+          createdById:      req.user.id,
           status:           'ACTIVE',
           variants: {
             create: [{

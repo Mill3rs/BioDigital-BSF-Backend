@@ -202,6 +202,34 @@ const calculatePercentage = (value, total) => {
   return (value / total) * 100;
 };
 
+// Waste is captured in whatever unit the supplier picked, but kg totals can
+// only be summed across mass units. Volume/count units (litres, crates, sacks)
+// are deliberately excluded rather than being added into a kg figure.
+const KG_PER_UNIT = {
+  kg: 1,
+  kilogram: 1,
+  kilograms: 1,
+  ton: 1000,
+  tons: 1000,
+  tonne: 1000,
+  tonnes: 1000
+};
+
+// Convert a quantity recorded in `unit` into kilograms (0 if not a mass unit)
+const toKilograms = (quantity, unit) => {
+  const value = Number(quantity) || 0;
+  const normalised = String(unit ?? 'kg').trim().toLowerCase();
+  const factor = KG_PER_UNIT[normalised];
+  return factor ? value * factor : 0;
+};
+
+// Total a Prisma `groupBy(by: ['unit'], _sum: { quantity })` result in kilograms
+const sumKilograms = (grouped) =>
+  (grouped || []).reduce(
+    (total, row) => total + toKilograms(row._sum?.quantity, row.unit),
+    0
+  );
+
 // Get days between dates
 const getDaysBetween = (startDate, endDate) => {
   const start = moment(startDate);
@@ -243,6 +271,8 @@ module.exports = {
   isEmpty,
   groupBy,
   calculatePercentage,
+  toKilograms,
+  sumKilograms,
   getDaysBetween,
   addDays,
   isEqual

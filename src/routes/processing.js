@@ -4,7 +4,12 @@ const { prisma } = require('../config/database');
 const { authenticate, authorize } = require('../middleware/auth');
 const { AppError } = require('../middleware/errorHandler');
 const { generateBatchNumber } = require('../utils/helpers');
+const { formatDate } = require('../utils/formatters');
 const { uploadMultiple } = require('../middleware/upload');
+const notificationService = require('../services/notificationService');
+const emailService = require('../services/emailService');
+const { sendToUser } = require('../sockets/helpers');
+const logger = require('../utils/logger');
 
 const router = express.Router();
 
@@ -18,7 +23,7 @@ const CLOSED_STATUSES = ['COMPLETED', 'CANCELLED', 'FAILED'];
 async function assertBatchIsActive(id) {
   const batch = await prisma.processingBatch.findUnique({
     where:  { id },
-    select: { id: true, batchNumber: true, startDate: true, status: true },
+    select: { id: true, batchNumber: true, startDate: true, status: true, quantity: true },
   });
   if (!batch) throw new AppError('Batch not found', 404);
   if (CLOSED_STATUSES.includes(batch.status)) {
@@ -28,13 +33,69 @@ async function assertBatchIsActive(id) {
 }
 
 // ─── BSF Life Cycle Stage Definitions ────────────────────────────────────────
+// A lifecycle has two possible endings:
+//   • Harvesting & Separation is carried out → the cycle ends.
+//   • Harvesting is not done within its window → the cycle continues through
+//     Pre-pupa → Pupa → Adult and then ends.
+// Every stage also advances automatically once its duration has elapsed.
 const BSF_STAGES = [
   { number: 1, name: 'Breeding & Egg Collection',     durationDays: 4,  description: 'Adult flies mate; eggs collected on substrate cards' },
   { number: 2, name: 'Hatching & Nursery',             durationDays: 7,  description: 'Eggs hatch to L1; early-instar larvae on starter substrate' },
   { number: 3, name: 'Larvae Rearing (Larviculture)', durationDays: 14, description: 'Main growth phase — L2-L5 larvae consuming organic waste' },
-  { number: 4, name: 'Harvesting & Separation',        durationDays: 2,  description: 'Pre-pupae harvested; frass mechanically separated' },
-  { number: 5, name: 'Post-Processing & Recycling',   durationDays: 3,  description: 'Larvae dried or processed; frass bagged and distributed' },
+  { number: 4, name: 'Harvesting & Separation',        durationDays: 14, description: 'Harvest larvae & frass. If not done within 14 days the cycle moves on to Pre-pupa' },
+  { number: 5, name: 'Pre-pupa',                       durationDays: 10, description: 'Larvae migrate off the feed and transform into pre-pupae' },
+  { number: 6, name: 'Pupa',                           durationDays: 10, description: 'Pre-pupae develop into pupae' },
+  { number: 7, name: 'Adult',                          durationDays: 15, description: 'Adults emerge, mate and lay eggs — cycle complete' },
 ];
+
+const HARVEST_STAGE = 4;                  // Harvesting & Separation
+const FINAL_STAGE   = BSF_STAGES.length;  // Adult
+const MS_PER_DAY    = 24 * 60 * 60 * 1000;
+
+const stageDefFor = (n) => BSF_STAGES[n - 1];
+const stageEndsAt = (n, startDate) =>
+  new Date(new Date(startDate).getTime() + stageDefFor(n).durationDays * MS_PER_DAY);
+
+/**
+ * Build the effective stage timeline for a batch.
+ * A manual STAGE_TRANSITION entry (the user pressed "Advance Stage") always
+ * wins; otherwise a stage advances automatically once its duration has elapsed.
+ * Closed batches never auto-advance.
+ */
+function buildStageTimeline(batch, stageLogs, now) {
+  const closed = CLOSED_STATUSES.includes(batch.status);
+
+  // Earliest manual entry time for each stage number (> 1)
+  const manual = new Map();
+  for (const log of stageLogs) {
+    const n = Number(log.metadata && log.metadata.stageNumber);
+    if (!n || n < 2 || n > FINAL_STAGE) continue;
+    const t = new Date(log.timestamp);
+    if (!manual.has(n) || t < manual.get(n)) manual.set(n, t);
+  }
+
+  const timeline = [{ stageNumber: 1, startDate: new Date(batch.startDate), auto: false }];
+  for (let n = 2; n <= FINAL_STAGE; n++) {
+    const prev = timeline[timeline.length - 1];
+    if (prev.stageNumber !== n - 1) break;
+
+    const manualAt = manual.get(n);
+    if (manualAt && manualAt.getTime() >= prev.startDate.getTime()) {
+      timeline.push({ stageNumber: n, startDate: manualAt, auto: false });
+      continue;
+    }
+    if (closed) break; // closed batches stay where they are
+
+    // Safety: Stage 1 holds the initial quantity that seeds the rest of the
+    // lifecycle (mass balance). Do not auto-advance past it until it is recorded.
+    if (prev.stageNumber === 1 && !(Number(batch.quantity) > 0)) break;
+
+    const dueAt = stageEndsAt(prev.stageNumber, prev.startDate);
+    if (dueAt.getTime() > now.getTime()) break;
+    timeline.push({ stageNumber: n, startDate: dueAt, auto: true });
+  }
+  return timeline;
+}
 
 /**
  * Compute the current BSF stage info for a batch.
@@ -43,31 +104,32 @@ const BSF_STAGES = [
  */
 function computeStageInfo(batch, stageLogs) {
   const now = new Date();
+  const closed = CLOSED_STATUSES.includes(batch.status);
   const batchStart = new Date(batch.startDate);
+  const timeline = buildStageTimeline(batch, stageLogs, now);
 
-  // Each log says "we entered stageNumber N at this timestamp"
-  const timeline = [{ stageNumber: 1, startDate: batchStart }];
-  for (const log of stageLogs) {
-    timeline.push({
-      stageNumber: log.metadata.stageNumber,
-      startDate:   new Date(log.timestamp),
-    });
-  }
+  const current    = timeline[timeline.length - 1];
+  const stageNum   = current.stageNumber;
+  const stageStart = current.startDate;
+  const def        = stageDefFor(stageNum);
+  const dayInStage = Math.max(0, Math.floor((now - stageStart) / MS_PER_DAY));
+  const daysLeft   = Math.max(0, def.durationDays - dayInStage);
+  const totalDays  = Math.max(0, Math.floor((now - batchStart) / MS_PER_DAY));
 
-  const current     = timeline[timeline.length - 1];
-  const stageNum    = current.stageNumber;
-  const stageStart  = current.startDate;
-  const stageDef    = BSF_STAGES[stageNum - 1];
-  const dayInStage  = Math.floor((now - stageStart)   / 86400000);
-  const daysLeft    = Math.max(0, stageDef.durationDays - dayInStage);
-  const totalDays   = Math.floor((now - batchStart)    / 86400000);
+  // The final stage completes the cycle once its duration elapses.
+  const finalElapsed =
+    stageNum === FINAL_STAGE &&
+    stageEndsAt(FINAL_STAGE, stageStart).getTime() <= now.getTime();
+  const cycleComplete = (closed && batch.status === 'COMPLETED') || finalElapsed;
 
-  // Days until we reach stage 4 (Harvesting)
+  // Days until the Harvesting stage begins (meaningful before/at harvest).
   let daysToHarvest = 0;
-  if (stageNum < 4) {
+  if (stageNum < HARVEST_STAGE) {
     daysToHarvest = daysLeft;
-    for (let s = stageNum + 1; s <= 3; s++) daysToHarvest += BSF_STAGES[s - 1].durationDays;
-  } else if (stageNum === 4) {
+    for (let s = stageNum + 1; s < HARVEST_STAGE; s++) {
+      daysToHarvest += stageDefFor(s).durationDays;
+    }
+  } else if (stageNum === HARVEST_STAGE) {
     daysToHarvest = daysLeft;
   }
 
@@ -75,39 +137,255 @@ function computeStageInfo(batch, stageLogs) {
   const history = timeline.map((entry, i) => {
     const next    = timeline[i + 1] || null;
     const endDate = next ? next.startDate : null;
-    const spent   = endDate ? Math.floor((endDate - entry.startDate) / 86400000) : dayInStage;
+    const spent   = endDate
+      ? Math.floor((endDate - entry.startDate) / MS_PER_DAY)
+      : dayInStage;
     return {
       stageNumber: entry.stageNumber,
-      stageName:   BSF_STAGES[entry.stageNumber - 1].name,
+      stageName:   stageDefFor(entry.stageNumber).name,
       startDate:   entry.startDate,
       endDate,
       daysSpent:   spent,
+      auto:        entry.auto,
       status:      endDate ? 'completed' : 'active',
     };
   });
 
-  // All 5 stages with status (for frontend stepper)
+  // All stages with status (for frontend stepper)
   const allStages = BSF_STAGES.map(s => {
     const h = history.find(x => x.stageNumber === s.number);
-    if (!h)                      return { ...s, status: 'upcoming' };
-    if (h.status === 'completed') return { ...s, status: 'completed', daysSpent: h.daysSpent };
+    if (!h) return { ...s, status: 'upcoming' };
+    if (h.status === 'completed') {
+      return { ...s, status: 'completed', daysSpent: h.daysSpent, auto: h.auto };
+    }
     return { ...s, status: 'active', dayInStage, daysRemaining: daysLeft };
   });
 
+  // Cage selected in the most recent stage entry. Hatching & Nursery inherits
+  // the Cage ID chosen in Breeding & Egg Collection, so the client prefills the
+  // next stage's Cage ID from this. Stage logs are ordered ascending, so scan
+  // newest-first.
+  const previousCageLog = [...stageLogs].reverse().find(
+    (l) => l.metadata && l.metadata.cageId,
+  );
+  const previousCageId = previousCageLog ? String(previousCageLog.metadata.cageId) : null;
+
   return {
     currentStage:         stageNum,
-    stageName:            stageDef.name,
-    stageDescription:     stageDef.description,
+    stageName:            def.name,
+    stageDescription:     def.description,
     stageStartDate:       stageStart,
     dayInStage,
-    stageDuration:        stageDef.durationDays,
+    stageDuration:        def.durationDays,
     daysRemainingInStage: daysLeft,
     totalDaysElapsed:     totalDays,
-    daysToHarvest:        stageNum <= 4 ? daysToHarvest : 0,
-    canAdvance:           stageNum < 5 && !CLOSED_STATUSES.includes(batch.status),
+    daysToHarvest:        stageNum <= HARVEST_STAGE ? daysToHarvest : 0,
+    previousCageId,
+    // Harvesting is only possible while the batch is still in (or before) the
+    // Harvesting stage; afterwards the cycle runs on to Pre-pupa.
+    canHarvest:           !closed && stageNum <= HARVEST_STAGE,
+    // Pre-pupa → Pupa → Adult advance on their own, but an open batch can
+    // still be advanced manually.
+    canAdvance:           !closed,
+    autoAdvance:          stageNum > HARVEST_STAGE,
+    cycleComplete,
     history,
     allStages,
   };
+}
+
+// ─── Batch event notifications (in-app + email) ───────────────────────────────
+
+/**
+ * Resolve the company (Admin) id a batch belongs to: prefer the batch's farm
+ * owner, falling back to the creator's own company.
+ */
+async function resolveBatchCompanyAdminId(batch) {
+  if (batch.farmId) {
+    const farm = await prisma.farm.findUnique({
+      where: { id: batch.farmId },
+      select: { adminId: true },
+    });
+    if (farm?.adminId) return farm.adminId;
+  }
+  if (batch.createdById) {
+    const creator = await prisma.user.findUnique({
+      where: { id: batch.createdById },
+      select: { managedById: true, adminManaged: { select: { id: true } } },
+    });
+    return creator?.adminManaged?.id ?? creator?.managedById ?? null;
+  }
+  return null;
+}
+
+/**
+ * Users that should hear about a batch: its creator plus the ADMIN and MANAGER
+ * users of the same company.
+ */
+async function batchRecipients(batch) {
+  const adminId = await resolveBatchCompanyAdminId(batch);
+  const or = [];
+  if (batch.createdById) or.push({ id: batch.createdById });
+  if (adminId) {
+    or.push({ managedById: adminId });
+    or.push({ adminManaged: { id: adminId } });
+  }
+  if (!or.length) return [];
+  return prisma.user.findMany({
+    where: { OR: or, role: { in: ['SUPER_ADMIN', 'ADMIN', 'MANAGER'] } },
+    select: { id: true, email: true },
+  });
+}
+
+/**
+ * Fan a processing-batch event out to the batch's company: in-app notification
+ * rows, a real-time socket banner and an email. Never throws — a notification
+ * failure must not fail the API request that triggered it.
+ */
+async function notifyBatchEvent(batchId, { subject, heading, intro, details = [] }) {
+  try {
+    const batch = await prisma.processingBatch.findUnique({
+      where: { id: batchId },
+      select: { id: true, batchNumber: true, farmId: true, createdById: true },
+    });
+    if (!batch) return;
+
+    const recipients = await batchRecipients(batch);
+    if (!recipients.length) return;
+
+    await notificationService.sendBulkNotifications(
+      recipients.map((u) => u.id),
+      subject,
+      intro,
+      'BATCH_UPDATE',
+      { batchId: batch.id, batchNumber: batch.batchNumber },
+    );
+
+    const seenEmails = new Set();
+    for (const user of recipients) {
+      // Real-time banner while the user has the dashboard open.
+      try {
+        sendToUser(user.id, 'batch:stage', {
+          title: subject,
+          batchId: batch.id,
+          batchNumber: batch.batchNumber,
+          message: intro,
+        });
+      } catch (_) { /* sockets may not be initialised yet */ }
+
+      const email = user.email && user.email.trim().toLowerCase();
+      if (!email || seenEmails.has(email)) continue;
+      seenEmails.add(email);
+      emailService
+        .sendBatchStageEmail(email, {
+          subject,
+          heading,
+          batchNumber: batch.batchNumber,
+          intro,
+          details,
+        })
+        .catch((err) => logger.error('Batch notification email failed:', err));
+    }
+  } catch (error) {
+    logger.error('notifyBatchEvent error:', error);
+  }
+}
+
+/**
+ * Persist stage transitions that have become due by time (and complete the
+ * cycle once the final stage's duration has elapsed). Run lazily whenever a
+ * lifecycle batch is read so the activity log and batch status stay in sync
+ * without a background scheduler. Idempotent — auto entries are timestamped at
+ * their due time, so re-running produces no duplicates.
+ */
+async function syncLifecycleStage(batchId) {
+  const batch = await prisma.processingBatch.findUnique({
+    where: { id: batchId },
+    select: { id: true, batchNumber: true, startDate: true, status: true, createdById: true, quantity: true },
+  });
+  if (!batch) return;
+  if (CLOSED_STATUSES.includes(batch.status)) return;
+  if (!batch.batchNumber || !batch.batchNumber.startsWith('LC-')) return;
+
+  const logs = await prisma.activityLog.findMany({
+    where: {
+      batchId,
+      action:  'NOTE_ADDED',
+      metadata: { path: ['type'], equals: 'STAGE_TRANSITION' },
+    },
+    orderBy: { timestamp: 'asc' },
+  });
+
+  const now = new Date();
+  const loggedStages = new Set();
+  for (const l of logs) {
+    const n = Number(l.metadata && l.metadata.stageNumber);
+    if (n >= 2) loggedStages.add(n);
+  }
+
+  const timeline = buildStageTimeline(batch, logs, now);
+
+  for (const entry of timeline) {
+    if (entry.stageNumber < 2 || !entry.auto) continue;
+    if (loggedStages.has(entry.stageNumber)) continue;
+    const def = stageDefFor(entry.stageNumber);
+    await prisma.activityLog.create({
+      data: {
+        batchId,
+        action: 'NOTE_ADDED',
+        description: `Automatically advanced to Stage ${entry.stageNumber}: ${def.name}`,
+        performedById: batch.createdById,
+        timestamp: entry.startDate,
+        metadata: {
+          type: 'STAGE_TRANSITION',
+          stageNumber: entry.stageNumber,
+          stageName: def.name,
+          auto: true,
+          notes: 'Stage duration elapsed — advanced automatically',
+        },
+      },
+    });
+
+    // Notify the company (in-app + email) that the batch reached this stage.
+    await notifyBatchEvent(batchId, {
+      subject: `Batch ${batch.batchNumber} reached Stage ${entry.stageNumber}: ${def.name}`,
+      heading: 'BSF Life Cycle — Stage Reached',
+      intro: `Batch ${batch.batchNumber} advanced automatically to Stage ${entry.stageNumber}: ${def.name}.`,
+      details: [
+        ['Stage', `Stage ${entry.stageNumber} of ${FINAL_STAGE} — ${def.name}`],
+        ['Stage started', formatDate(entry.startDate, 'DD MMM YYYY')],
+        ['Next advance in', `${def.durationDays} days`],
+      ],
+    });
+  }
+
+  const last = timeline[timeline.length - 1];
+  if (
+    last.stageNumber === FINAL_STAGE &&
+    stageEndsAt(FINAL_STAGE, last.startDate).getTime() <= now.getTime()
+  ) {
+    await prisma.processingBatch.update({
+      where: { id: batchId },
+      data: { status: 'COMPLETED', endDate: now, completedAt: now },
+    });
+    await prisma.activityLog.create({
+      data: {
+        batchId,
+        action: 'BATCH_COMPLETED',
+        description: 'BSF lifecycle complete — Adult stage finished.',
+        performedById: batch.createdById,
+        metadata: { lifecycleComplete: true, completedAt: now.toISOString(), auto: true },
+      },
+    });
+
+    // Notify the company that the cycle ran to completion.
+    await notifyBatchEvent(batchId, {
+      subject: `BSF Life Cycle completed: ${batch.batchNumber}`,
+      heading: 'BSF Life Cycle Complete',
+      intro: `Batch ${batch.batchNumber} has completed its BSF life cycle (Adult stage finished).`,
+      details: [['Completed', formatDate(now, 'DD MMM YYYY')]],
+    });
+  }
 }
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -160,7 +438,35 @@ router.get('/batches', authenticate, async (req, res, next) => {
       }),
       prisma.processingBatch.count({ where })
     ]);
-    
+
+    // Keep lifecycle stages in sync with elapsed time so the status badges are
+    // current. Only batches whose current stage is already due are synced, so
+    // the common case adds no extra queries (best effort — a failure must not
+    // break the list).
+    const nowMs = Date.now();
+    const dueIds = [];
+    for (const b of batches) {
+      if (!b.batchNumber || !b.batchNumber.startsWith('LC-')) continue;
+      if (CLOSED_STATUSES.includes(b.status)) continue;
+      const stageLog = (b.activityLogs ?? []).find(
+        (l) => l.action === 'NOTE_ADDED' && l.metadata && l.metadata.type === 'STAGE_TRANSITION'
+      );
+      const stageNum = Number(stageLog && stageLog.metadata && stageLog.metadata.stageNumber) || 1;
+      const stageStart = stageLog ? new Date(stageLog.timestamp) : new Date(b.startDate);
+      const def = BSF_STAGES[stageNum - 1];
+      if (!def) continue;
+      if (stageStart.getTime() + def.durationDays * MS_PER_DAY <= nowMs) {
+        dueIds.push(b.id);
+      }
+    }
+    for (const id of dueIds) {
+      try {
+        await syncLifecycleStage(id);
+      } catch {
+        /* ignore */
+      }
+    }
+
     res.json({
       success: true,
       data: batches,
@@ -180,13 +486,28 @@ router.get('/batches', authenticate, async (req, res, next) => {
 router.post('/batches', authenticate, authorize('MANAGER', 'ADMIN'), [
   body('name').optional().isString(),
   body('processType').isIn(['COMPOSTING', 'ANAEROBIC_DIGESTION', 'VERMICOMPOSTING', 'BSF_LARVAE_PROCESSING', 'BLACK_SOLDIER_FLY', 'FERMENTATION', 'DRYING', 'PELLETIZING', 'OTHER']),
-  body('quantity').isFloat({ gt: 0 }).withMessage('Quantity must be greater than 0'),
+  // Lifecycle batches no longer capture an initial quantity up-front — it is
+  // entered on the Breeding & Egg Collection (Stage 1) form instead.
+  body('quantity').optional({ nullable: true }).isFloat({ min: 0 }),
   body('startDate').isISO8601().withMessage('Valid start date is required'),
   body('batchType').optional().isIn(['WASTE', 'LIFECYCLE']),
-  body('startStage').optional().isInt({ min: 1, max: 5 }).withMessage('Start stage must be between 1 and 5'),
+  body('startStage').optional().isInt({ min: 1, max: 7 }).withMessage('Start stage must be between 1 and 7'),
   body('wasteType').optional().isString(),
   body('specificWasteItem').optional().isString(),
-  body('instructions').optional().isString()
+  body('instructions').optional().isString(),
+  // Breeding & Egg Collection (Stage 1) — captured when a lifecycle is created.
+  body('cageId').optional().isString(),
+  body('timeCollected').optional().isString(),
+  body('eggClutches').optional({ nullable: true }).isFloat({ min: 0 }),
+  body('initialQuantityG').optional({ nullable: true }).isFloat({ min: 0 }),
+  body('condition').optional().isString(),
+  // Hatching & Nursery data — only supplied when the cycle starts at a later
+  // stage and Hatching & Nursery is skipped.
+  body('weightOfHatchedEggs').optional({ nullable: true }).isFloat({ min: 0 }),
+  body('feedUsed').optional({ nullable: true }).isFloat({ min: 0 }),
+  body('temperature').optional({ nullable: true }).isFloat({ min: -50, max: 80 }),
+  body('humidity').optional({ nullable: true }).isFloat({ min: 0, max: 100 }),
+  body('hatchRate').optional({ nullable: true }).isFloat({ min: 0 })
 ], async (req, res, next) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
@@ -208,16 +529,35 @@ router.post('/batches', authenticate, authorize('MANAGER', 'ADMIN'), [
       startStage,
       wasteType,
       specificWasteItem,
-      instructions
+      instructions,
+      // Breeding & Egg Collection — captured at creation
+      cageId,
+      timeCollected,
+      eggClutches,
+      initialQuantityG,
+      condition,
+      // Hatching & Nursery — captured when that stage is skipped
+      weightOfHatchedEggs,
+      feedUsed,
+      humidity,
+      hatchRate
     } = req.body;
     
+    const parseQty = quantity != null && quantity !== '' ? parseFloat(quantity) : 0;
+    if (batchType !== 'LIFECYCLE' && !(parseQty > 0)) {
+      return res.status(400).json({
+        success: false,
+        errors: [{ param: 'quantity', msg: 'Quantity must be greater than 0' }],
+      });
+    }
+
     const batch = await prisma.processingBatch.create({
       data: {
         name: name || (batchType === 'LIFECYCLE' ? 'BSF Life Cycle' : `Waste Batch ${new Date().toLocaleDateString()}`),
         batchNumber: batchNumber || generateBatchNumber(batchType || 'WASTE'),
         startDate: new Date(startDate),
         processType,
-        quantity: parseFloat(quantity),
+        quantity: Number.isFinite(parseQty) ? parseQty : 0,
         farmId: farmId || req.user.farmId,
         createdById: req.user.id,
         status: 'PENDING',
@@ -244,14 +584,59 @@ router.post('/batches', authenticate, authorize('MANAGER', 'ADMIN'), [
       }
     });
 
+    // Breeding & Egg Collection (Stage 1) is recorded here rather than on a
+    // separate form. Stored as a "Stage 1" stage entry so the lifecycle keeps
+    // its full stage timeline and later stages can inherit the cage.
+    if (batchType === 'LIFECYCLE') {
+      const initialG = initialQuantityG != null && initialQuantityG !== ''
+        ? parseFloat(initialQuantityG)
+        : (parseQty > 0 ? parseQty * 1000 : null);
+      await prisma.activityLog.create({
+        data: {
+          batchId: batch.id,
+          action: 'NOTE_ADDED',
+          description: 'Breeding & Egg Collection recorded when the cycle was created',
+          performedById: req.user.id,
+          metadata: {
+            type: 'STAGE_TRANSITION',
+            stageNumber: 1,
+            stageName: BSF_STAGES[0].name,
+            cageId: cageId || null,
+            timeCollected: timeCollected || null,
+            eggClutches: eggClutches != null && eggClutches !== '' ? parseFloat(eggClutches) : null,
+            initialQuantityG: initialG,
+            condition: condition || null,
+            recordedAtCreation: true,
+          },
+        },
+      });
+    }
+
     // If the user chose to start the BSF Life Cycle at a later stage
     // (e.g. Larvae Rearing), seed STAGE_TRANSITION logs for the skipped
     // stages so stage tracking starts at the selected stage.
     if (batchType === 'LIFECYCLE' && startStage && Number(startStage) > 1) {
-      const target = Math.min(Number(startStage), 5);
+      const target = Math.min(Number(startStage), FINAL_STAGE);
       const startTs = new Date(startDate).getTime();
+      const toF = (v) => (v != null && v !== '' ? parseFloat(v) : null);
       for (let s = 2; s <= target; s++) {
         const stage = BSF_STAGES[s - 1];
+        const meta = {
+          type: 'STAGE_TRANSITION',
+          stageNumber: s,
+          stageName: stage.name,
+          notes: 'Batch started directly at this stage',
+        };
+        // Starting at a later stage means Hatching & Nursery is skipped, so its
+        // data (the Larvae Rearing basis) is recorded here instead.
+        if (s === 2) {
+          meta.startDate = startDate;
+          meta.weightOfHatchedEggs = toF(weightOfHatchedEggs);
+          meta.feedUsed = toF(feedUsed);
+          meta.temperature = toF(temperature);
+          meta.humidity = toF(humidity);
+          meta.hatchRate = toF(hatchRate);
+        }
         await prisma.activityLog.create({
           data: {
             batchId: batch.id,
@@ -259,17 +644,38 @@ router.post('/batches', authenticate, authorize('MANAGER', 'ADMIN'), [
             description: `Batch started at Stage ${s}: ${stage.name}`,
             performedById: req.user.id,
             timestamp: new Date(startTs + (s - 2) * 1000),
-            metadata: {
-              type: 'STAGE_TRANSITION',
-              stageNumber: s,
-              stageName: stage.name,
-              notes: 'Batch started directly at this stage',
-            },
+            metadata: meta,
           },
         });
       }
     }
-    
+
+    // Notify the company (in-app + email) that the batch was created.
+    if (batchType === 'LIFECYCLE') {
+      const startNum = Math.min(Math.max(Number(startStage) || 1, 1), FINAL_STAGE);
+      const startDef = stageDefFor(startNum);
+      await notifyBatchEvent(batch.id, {
+        subject: `New BSF Life Cycle started: ${batch.batchNumber}`,
+        heading: 'BSF Life Cycle Created',
+        intro: `Batch ${batch.batchNumber} was created${req.user.fullName ? ` by ${req.user.fullName}` : ''} and starts at Stage ${startNum}: ${startDef.name}.`,
+        details: [
+          ['Current stage', `Stage ${startNum} of ${FINAL_STAGE} — ${startDef.name}`],
+          ['Start date', formatDate(batch.startDate, 'DD MMM YYYY')],
+          ['Next advance in', `${startDef.durationDays} days`],
+        ],
+      });
+    } else {
+      await notifyBatchEvent(batch.id, {
+        subject: `New processing batch created: ${batch.batchNumber}`,
+        heading: 'Processing Batch Created',
+        intro: `Waste batch ${batch.batchNumber} was created${req.user.fullName ? ` by ${req.user.fullName}` : ''} with ${batch.quantity} kg of waste.`,
+        details: [
+          ['Input waste', `${batch.quantity} kg`],
+          ['Start date', formatDate(batch.startDate, 'DD MMM YYYY')],
+        ],
+      });
+    }
+
     res.status(201).json({ success: true, data: batch });
   } catch (error) {
     next(error);
@@ -279,6 +685,8 @@ router.post('/batches', authenticate, authorize('MANAGER', 'ADMIN'), [
 // Get batch by ID
 router.get('/batches/:id', authenticate, async (req, res, next) => {
   try {
+    // Keep lifecycle stages in sync with elapsed time before returning detail.
+    await syncLifecycleStage(req.params.id);
     const batch = await prisma.processingBatch.findUnique({
       where: { id: req.params.id },
       include: {
@@ -997,9 +1405,11 @@ router.post('/batches/:id/daily-log',
 router.get('/batches/:id/stage', authenticate, async (req, res, next) => {
   try {
     const { id } = req.params;
+    // Keep lifecycle stages in sync with elapsed time before returning info.
+    await syncLifecycleStage(id);
     const batch = await prisma.processingBatch.findUnique({
       where:  { id },
-      select: { id: true, batchNumber: true, startDate: true, status: true },
+      select: { id: true, batchNumber: true, startDate: true, status: true, quantity: true },
     });
     if (!batch) throw new AppError('Batch not found', 404);
 
@@ -1089,6 +1499,9 @@ router.post('/batches/:id/advance-stage',
     body('timeCollected').optional().isString(),
     body('eggClutches').optional({ nullable: true }).isFloat({ min: 0 }),
     body('initialWeight').optional({ nullable: true }).isFloat({ min: 0 }),
+    // Initial quantity of eggs / hatched eggs / young larvae captured on the
+    // Breeding & Egg Collection (Stage 1) form — entered in grams.
+    body('initialQuantityG').optional({ nullable: true }).isFloat({ min: 0 }),
     body('condition').optional().isString(),
     // Stage 2: Hatching & Nursery
     body('startDate').optional().isString(),
@@ -1104,6 +1517,7 @@ router.post('/batches/:id/advance-stage',
     body('trayIds').optional().isArray().withMessage('trayIds must be an array'),
     body('trayAllocations').optional().isArray().withMessage('trayAllocations must be an array'),
     body('feedBatchId').optional().isString(),
+    body('feedSources').optional().isArray().withMessage('feedSources must be an array'),
     body('feedAdded').optional({ nullable: true }).isFloat({ min: 0 }),
     body('larvaeCondition').optional().isString(),
     body('hatchedWeightG').optional({ nullable: true }).isFloat({ min: 0 }),
@@ -1124,16 +1538,19 @@ router.post('/batches/:id/advance-stage',
       const {
         notes, stageWeight, harvestBsfLarvae, harvestFrass, harvestPrepupae, harvestRecycled,
         // Stage 1
-        cageId, timeCollected, eggClutches, initialWeight, condition,
+        cageId, timeCollected, eggClutches, initialWeight, initialQuantityG, condition,
         // Stage 2
         startDate, temperature, humidity, weightOfHatchedEggs, feedUsed, hatchRate,
         // Stage 3
-        trayId, trayIds, trayAllocations, feedBatchId, feedAdded, larvaeCondition,
+        trayId, trayIds, trayAllocations, feedBatchId, feedSources, feedAdded, larvaeCondition,
         hatchedWeightG,
         // Stage 4
         larvaeHarvested, frassCollected, residue, qualityGrade, actualWeight,
       } = req.body;
 
+      // Apply any stage transitions that have fallen due by time before we
+      // compute the current stage (avoids advancing a batch that auto-completed).
+      await syncLifecycleStage(id);
       const batch = await assertBatchIsActive(id);
 
       const stageLogs = await prisma.activityLog.findMany({
@@ -1147,12 +1564,16 @@ router.post('/batches/:id/advance-stage',
 
       const info = computeStageInfo(batch, stageLogs);
       if (!info.canAdvance) {
-        throw new AppError('Batch is already at the final stage (Post-Processing & Recycling)', 422);
+        throw new AppError('This batch is closed and can no longer be advanced', 422);
       }
 
-      const nextNum   = info.currentStage + 1;
+      // Completing Harvesting & Separation ends the cycle; so does finishing the
+      // final Adult stage. Every other step simply moves to the next stage.
+      const harvestDone  = info.currentStage === HARVEST_STAGE;
+      const atFinalStage = info.currentStage >= FINAL_STAGE;
+      const isLifecycleComplete = harvestDone || atFinalStage;
+      const nextNum   = isLifecycleComplete ? info.currentStage : info.currentStage + 1;
       const nextStage = BSF_STAGES[nextNum - 1];
-      const isLifecycleComplete = nextNum === BSF_STAGES.length; // advancing to final stage
 
       const toF = (v) => (v != null && v !== '' ? parseFloat(v) : null);
       const harvestTotal = [harvestBsfLarvae, harvestFrass, harvestPrepupae].reduce(
@@ -1182,13 +1603,27 @@ router.post('/batches/:id/advance-stage',
         stageMeta.cageId = cageId || null;
         stageMeta.timeCollected = timeCollected || null;
         stageMeta.eggClutches = toF(eggClutches);
-        stageMeta.initialWeight = toF(initialWeight);
+        // The initial quantity is captured here (grams) and becomes the batch's
+        // basis quantity (kg) used across the rest of the lifecycle.
+        const initialG = toF(initialQuantityG) ?? toF(initialWeight);
+        stageMeta.initialQuantityG = initialG;
+        stageMeta.initialWeight = initialG;
         stageMeta.condition = condition || null;
+        if (initialG != null) {
+          await prisma.processingBatch.update({
+            where: { id },
+            data:  { quantity: initialG / 1000 },
+          });
+        }
       }
 
       if (info.currentStage === 2) {
-        // Auto-populate cageId from stage 1 metadata
-        const stage1Log = stageLogs.find(l => l.metadata && l.metadata.stageNumber === 1);
+        // Breeding & Egg Collection (Stage 1) is recorded at creation so its
+        // cage lives on the "Stage 1" entry; older batches recorded it on the
+        // "Stage 2" entry.
+        const stage1Log =
+          stageLogs.find(l => l.metadata && Number(l.metadata.stageNumber) === 1) ||
+          stageLogs.find(l => l.metadata && Number(l.metadata.stageNumber) === 2);
         stageMeta.cageId = stage1Log?.metadata?.cageId || cageId || null;
         stageMeta.startDate = startDate || null;
         stageMeta.temperature = toF(temperature);
@@ -1205,13 +1640,13 @@ router.post('/batches/:id/advance-stage',
         const hatchedEggsWeight = stage2Log?.metadata?.weightOfHatchedEggs
           ? parseFloat(stage2Log.metadata.weightOfHatchedEggs)
           : toF(weightOfHatchedEggs);
-        const larvaeQty = hatchedEggsWeight || batch.quantity * 0.15; // ~15% of input if no hatch weight
+        const larvaeQty = hatchedEggsWeight || batch.quantity * 1000 * 0.15; // ~15% of input (kg → g) if no hatch weight
 
         await prisma.activityLog.create({
           data: {
             batchId:        id,
             action:         'NOTE_ADDED',
-            description:    `Larvae batch created from Hatched Eggs (${larvaeQty.toFixed(2)} kg)`,
+            description:    `Larvae batch created from Hatched Eggs (${larvaeQty.toFixed(2)} g)`,
             performedById:  req.user.id,
             metadata: {
               type:              'LARVAE_BATCH_CREATED',
@@ -1232,9 +1667,9 @@ router.post('/batches/:id/advance-stage',
             ? trayIds.filter((t) => typeof t === 'string' && t)
             : [];
 
-        // Per-tray allocations: each selected tray gets an LC batch portion
-        // and a feed quantity. The feed total is derived from the allocations
-        // (falling back to the legacy feedAdded field).
+        // Per-tray allocations: each selected tray gets a portion of the LC
+        // batch content. (feedKg is retained for backward compatibility with
+        // entries created before feed sources carried their own quantities.)
         const allocs = Array.isArray(trayAllocations)
           ? trayAllocations
               .filter((a) => a && typeof a.trayId === 'string')
@@ -1245,15 +1680,33 @@ router.post('/batches/:id/advance-stage',
               }))
           : [];
         const allocFeedTotal = allocs.reduce((s, a) => s + (a.feedKg ?? 0), 0);
-        const totalFeed = allocFeedTotal > 0 ? allocFeedTotal : toF(feedAdded);
+
+        // Feed may be drawn from one or more waste batches. Each selected
+        // source records how much of that batch was fed to the larvae.
+        const feedSourceList = Array.isArray(feedSources)
+          ? feedSources
+              .filter((f) => f && typeof f.batchId === 'string' && f.batchId)
+              .map((f) => ({ batchId: f.batchId, quantity: toF(f.quantity) ?? 0 }))
+          : [];
+        const feedSourceTotal = feedSourceList.reduce(
+          (s, f) => s + (f.quantity ?? 0),
+          0
+        );
+        // The feed sources define the total feed used; fall back to the legacy
+        // per-tray feed allocation / feedAdded for older clients.
+        const totalFeed =
+          feedSourceTotal > 0
+            ? feedSourceTotal
+            : allocFeedTotal > 0
+              ? allocFeedTotal
+              : toF(feedAdded) ?? 0;
 
         stageMeta.batchNumber = batch.batchNumber;
         // Full tray list + first tray for backward compatibility
         stageMeta.trayIds = selectedTrayIds.length > 0 ? selectedTrayIds : null;
         stageMeta.trayId = selectedTrayIds[0] || trayId || null;
         stageMeta.trayAllocations = allocs.length > 0 ? allocs : null;
-        stageMeta.feedBatchId = feedBatchId || null;
-        stageMeta.feedAdded = totalFeed;
+        stageMeta.feedAdded = totalFeed > 0 ? totalFeed : null;
         stageMeta.temperature = toF(temperature);
         stageMeta.humidity = toF(humidity);
         stageMeta.larvaeCondition = larvaeCondition || null;
@@ -1261,23 +1714,49 @@ router.post('/batches/:id/advance-stage',
         // stage (carried over from Stage 2, adjustable on the Stage 3 form).
         stageMeta.hatchedWeightG = toF(hatchedWeightG);
 
-        // Resolve the Feed Source to its batch number so the activity log
+        // Resolve each feed source to its batch number so the activity log
         // shows "WB-…" instead of the raw record id.
-        if (feedBatchId) {
+        if (feedSourceList.length > 0) {
+          const feedBatches = await prisma.processingBatch.findMany({
+            where: { id: { in: feedSourceList.map((f) => f.batchId) } },
+            select: { id: true, batchNumber: true },
+          });
+          const numberById = new Map(feedBatches.map((b) => [b.id, b.batchNumber]));
+          stageMeta.feedSources = feedSourceList.map((f) => ({
+            batchId: f.batchId,
+            batchNumber: numberById.get(f.batchId) || null,
+            quantity: f.quantity,
+          }));
+          // Backward-compat: expose the first source as the singular feed source.
+          stageMeta.feedBatchId = feedSourceList[0].batchId;
+          stageMeta.feedBatchNumber = numberById.get(feedSourceList[0].batchId) || null;
+        } else if (feedBatchId) {
           const feedBatch = await prisma.processingBatch.findUnique({
             where: { id: feedBatchId },
             select: { batchNumber: true },
           });
+          stageMeta.feedBatchId = feedBatchId;
           stageMeta.feedBatchNumber = feedBatch?.batchNumber || null;
+        } else {
+          stageMeta.feedBatchId = null;
+          stageMeta.feedBatchNumber = null;
         }
 
-        // Deduct the fed quantity from the Feed Source (waste batch) so its
+        // Deduct the fed quantity from each Feed Source (waste batch) so its
         // remaining quantity reflects what was fed to the larvae.
-        const fed = totalFeed;
-        if (feedBatchId && fed > 0) {
+        if (feedSourceList.length > 0) {
+          for (const source of feedSourceList) {
+            if (source.quantity > 0) {
+              await prisma.processingBatch.update({
+                where: { id: source.batchId },
+                data: { fedQuantity: { increment: source.quantity } },
+              });
+            }
+          }
+        } else if (feedBatchId && totalFeed > 0) {
           await prisma.processingBatch.update({
             where: { id: feedBatchId },
-            data: { fedQuantity: { increment: fed } },
+            data: { fedQuantity: { increment: totalFeed } },
           });
         }
       }
@@ -1323,9 +1802,11 @@ router.post('/batches/:id/advance-stage',
         data: {
           batchId:        id,
           action:         'NOTE_ADDED',
-          description:    `Advanced to Stage ${nextNum}: ${nextStage.name}`,
+          description:    isLifecycleComplete
+            ? `Lifecycle completed at Stage ${info.currentStage}: ${info.stageName}`
+            : `Advanced to Stage ${nextNum}: ${nextStage.name}`,
           performedById:  req.user.id,
-          metadata: stageMeta,
+          metadata: { ...stageMeta, completed: isLifecycleComplete || undefined },
         },
       });
 
@@ -1344,7 +1825,7 @@ router.post('/batches/:id/advance-stage',
           data: {
             batchId:       id,
             action:        'BATCH_COMPLETED',
-            description:   'BSF lifecycle complete — all 5 stages finished. Batch marked complete.',
+            description:   'BSF lifecycle complete — batch marked complete.',
             performedById: req.user.id,
             metadata: { lifecycleComplete: true, completedAt: now.toISOString() },
           },
@@ -1366,6 +1847,29 @@ router.post('/batches/:id/advance-stage',
           select: { id: true, batchNumber: true, startDate: true, status: true },
         }),
       ]);
+
+      // Notify the company (in-app + email) about the new stage / completion.
+      // Only BSF Life Cycles have a stage timeline.
+      if (batch.batchNumber && batch.batchNumber.startsWith('LC-')) {
+        const reachedNum = isLifecycleComplete ? info.currentStage : nextNum;
+        const reachedDef = BSF_STAGES[reachedNum - 1];
+        const actor = req.user.fullName ? ` by ${req.user.fullName}` : '';
+        await notifyBatchEvent(id, {
+          subject: isLifecycleComplete
+            ? `BSF Life Cycle completed: ${batch.batchNumber}`
+            : `Batch ${batch.batchNumber} reached Stage ${reachedNum}: ${reachedDef.name}`,
+          heading: isLifecycleComplete ? 'BSF Life Cycle Complete' : 'BSF Life Cycle — Stage Reached',
+          intro: isLifecycleComplete
+            ? `Batch ${batch.batchNumber} has completed its BSF life cycle at Stage ${info.currentStage}: ${info.stageName}${actor}.`
+            : `Batch ${batch.batchNumber} advanced to Stage ${reachedNum}: ${reachedDef.name}${actor}.`,
+          details: [
+            ['Stage', `Stage ${reachedNum} of ${FINAL_STAGE} — ${reachedDef.name}`],
+            isLifecycleComplete
+              ? ['Completed', formatDate(new Date(), 'DD MMM YYYY')]
+              : ['Next advance in', `${reachedDef.durationDays} days`],
+          ],
+        });
+      }
 
       res.json({
         success: true,

@@ -337,6 +337,62 @@ class EmailService {
     return this.sendEmail(email, `Batch ${batch.batchNumber} Completed`, html);
   }
 
+  /**
+   * Lifecycle / processing batch notification email. Used for "batch created"
+   * and "stage reached" events. `details` is a list of [label, value] pairs.
+   */
+  async sendBatchStageEmail(email, { subject, heading, batchNumber, intro, details = [] }) {
+    const escape = (v) =>
+      String(v ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+
+    const rows = (details || [])
+      .filter((d) => Array.isArray(d) && d[0] != null && d[1] != null && d[1] !== '')
+      .map(([label, value]) => `<p><strong>${escape(label)}:</strong> ${escape(value)}</p>`)
+      .join('\n              ');
+
+    const html = `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <style>
+          body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
+          .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+          .header { background-color: #2E7D32; color: white; padding: 20px; text-align: center; }
+          .content { padding: 20px; background-color: #f9f9f9; }
+          .stats { background-color: white; padding: 15px; border-radius: 4px; margin: 15px 0; }
+          .footer { text-align: center; color: #888; font-size: 12px; padding: 10px; }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="header">
+            <h1>${escape(heading)}</h1>
+          </div>
+          <div class="content">
+            <p>Hello,</p>
+            <p>${escape(intro)}</p>
+            <div class="stats">
+              <p><strong>Batch:</strong> ${escape(batchNumber)}</p>
+              ${rows}
+            </div>
+            <p>Log in to the BioDigital BSF dashboard to view the full batch details.</p>
+          </div>
+          <div class="footer">
+            <p>&copy; 2024 BioDigital BSF. All rights reserved.</p>
+          </div>
+        </div>
+      </body>
+      </html>
+    `;
+
+    return this.sendEmail(email, subject, html);
+  }
+
   async sendDriverReviewEmail(email, driverName, { rating, comment, orderNumber }) {
     const stars = '★'.repeat(rating) + '☆'.repeat(5 - rating);
     const html = `
