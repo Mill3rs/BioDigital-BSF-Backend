@@ -1,10 +1,10 @@
 const express = require('express');
 const { body, validationResult } = require('express-validator');
 const { prisma } = require('../config/database');
-const { authenticate, authorize } = require('../middleware/auth');
+const { authenticate, authorize, optionalAuth } = require('../middleware/auth');
 const { AppError } = require('../middleware/errorHandler');
 const { uploadMultiple, toUploadPath } = require('../middleware/upload');
-const { batchOutputSummary, extractHarvest } = require('../utils/batchOutput');
+const { batchOutputSummary, extractHarvest, SOURCE_COMPONENTS } = require('../utils/batchOutput');
 
 const router = express.Router();
 
@@ -22,7 +22,7 @@ function productCompanyScopes(adminId, userId) {
 // Only ADMIN / MANAGER (company console) are scoped. SUPER_ADMIN sees all,
 // and marketplace roles (BUYER etc.) keep browsing every product.
 function shouldScopeProducts(user) {
-  return (user.role === 'ADMIN' || user.role === 'MANAGER') && user.adminId;
+  return !!user && (user.role === 'ADMIN' || user.role === 'MANAGER') && !!user.adminId;
 }
 
 // Throws 404 if an ADMIN/MANAGER tries to touch another company's product.
@@ -34,24 +34,42 @@ async function assertProductAccess(productId, req) {
   if (count === 0) throw new AppError('Product not found', 404);
 }
 
+// Coerce a submitted variant quantity into a safe, non-negative number rounded
+// to 2 decimal places. Guards against non-finite or subnormal values that would
+// otherwise corrupt stock and make a product show as out of stock.
+function normalizeQuantity(value) {
+  const n = Number.parseFloat(value);
+  if (!Number.isFinite(n) || n < 0) return 0;
+  return Math.round(n * 100) / 100;
+}
+
 // Get all products
-router.get('/', authenticate, async (req, res, next) => {
+router.get('/', optionalAuth, async (req, res, next) => {
   try {
     const {
       category,
+      sourceComponent,
       status,
       farmId,
       minPrice,
       maxPrice,
       search,
+      featured,
       page = 1,
       limit = 20
     } = req.query;
     
     const where = {};
     if (category) where.category = category;
-    if (status) where.status = status;
+    if (sourceComponent) where.sourceComponent = sourceComponent;
+    // Guests only ever see the public (ACTIVE) catalogue.
+    if (req.user) {
+      if (status) where.status = status;
+    } else {
+      where.status = 'ACTIVE';
+    }
     if (farmId) where.farmId = farmId;
+    if (featured === 'true') where.featured = true;
     
     const conditions = [];
     if (search) {
@@ -120,13 +138,127 @@ router.get('/', authenticate, async (req, res, next) => {
   }
 });
 
+// Best sellers — products ranked by units sold across non-cancelled orders.
+router.get('/best-sellers', optionalAuth, async (req, res, next) => {
+  try {
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 8, 1), 24);
+
+    // Aggregate units sold per product, ignoring cancelled/refunded/soft-deleted orders.
+    const ranked = await prisma.$queryRaw`
+      SELECT v."productId" AS "productId", SUM(oi."quantity")::int AS "soldCount"
+      FROM "OrderItem" oi
+      JOIN "Order" o ON o."id" = oi."orderId"
+      JOIN "ProductVariant" v ON v."id" = oi."variantId"
+      WHERE o."status"::text NOT IN ('CANCELLED', 'REFUNDED')
+        AND o."deletedAt" IS NULL
+      GROUP BY v."productId"
+      ORDER BY "soldCount" DESC
+      LIMIT ${limit}
+    `;
+
+    if (ranked.length === 0) {
+      return res.json({ success: true, data: [] });
+    }
+
+    const productIds = ranked.map(r => r.productId);
+    const soldByProduct = new Map(ranked.map(r => [r.productId, Number(r.soldCount)]));
+
+    const products = await prisma.product.findMany({
+      where: { id: { in: productIds }, status: 'ACTIVE' },
+      include: {
+        variants: { where: { isActive: true }, orderBy: { price: 'asc' } },
+        farm: { select: { id: true, name: true } },
+        _count: { select: { reviews: true } }
+      }
+    });
+    const byId = new Map(products.map(p => [p.id, p]));
+
+    const data = productIds
+      .map(id => byId.get(id))
+      .filter(Boolean)
+      .map(product => ({
+        ...product,
+        soldCount: soldByProduct.get(product.id) ?? 0,
+        minPrice: product.variants.length ? Math.min(...product.variants.map(v => v.price)) : 0,
+        totalQuantity: product.variants.reduce((sum, v) => sum + (v.quantity ?? 0), 0),
+        reviewCount: product._count.reviews
+      }));
+
+    res.json({ success: true, data });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Deals — active products with at least one variant on sale (comparePrice above price).
+router.get('/deals', optionalAuth, async (req, res, next) => {
+  try {
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 8, 1), 24);
+
+    const saleVariants = await prisma.productVariant.findMany({
+      where: { isActive: true, comparePrice: { not: null } },
+      select: { productId: true, price: true, comparePrice: true }
+    });
+
+    // Prisma cannot compare two columns in `where`, so score the discount here.
+    const discountByProduct = new Map();
+    for (const v of saleVariants) {
+      if (!v.comparePrice || v.comparePrice <= v.price) continue;
+      const percent = ((v.comparePrice - v.price) / v.comparePrice) * 100;
+      if (percent > (discountByProduct.get(v.productId) ?? 0)) {
+        discountByProduct.set(v.productId, percent);
+      }
+    }
+
+    if (discountByProduct.size === 0) {
+      return res.json({ success: true, data: [] });
+    }
+
+    const productIds = [...discountByProduct.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, limit)
+      .map(([id]) => id);
+
+    const products = await prisma.product.findMany({
+      where: { id: { in: productIds }, status: 'ACTIVE' },
+      include: {
+        variants: { where: { isActive: true }, orderBy: { price: 'asc' } },
+        farm: { select: { id: true, name: true } },
+        _count: { select: { reviews: true } }
+      }
+    });
+    const byId = new Map(products.map(p => [p.id, p]));
+
+    const data = productIds
+      .map(id => byId.get(id))
+      .filter(Boolean)
+      .map(product => {
+        const discounts = product.variants
+          .filter(v => v.comparePrice && v.comparePrice > v.price)
+          .map(v => ((v.comparePrice - v.price) / v.comparePrice) * 100);
+        return {
+          ...product,
+          maxDiscountPercent: discounts.length ? Math.round(Math.max(...discounts)) : 0,
+          minPrice: product.variants.length ? Math.min(...product.variants.map(v => v.price)) : 0,
+          totalQuantity: product.variants.reduce((sum, v) => sum + (v.quantity ?? 0), 0),
+          reviewCount: product._count.reviews
+        };
+      });
+
+    res.json({ success: true, data });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // Create product
 router.post('/', authenticate, authorize('MANAGER', 'ADMIN'), [
   body('name').notEmpty().withMessage('Product name is required'),
   body('category').isIn(['ORGANIC_FERTILIZER', 'PROTEIN_FEED', 'INSECT_OIL', 'SOIL_CONDITIONER', 'FRESH_LARVAE', 'DRIED_LARVAE', 'COMPOST', 'LIQUID_FERTILIZER', 'BIOCHAR', 'OTHER']),
+  body('sourceComponent').optional().isIn(['LARVAE', 'FRASS', 'RESIDUE']).withMessage('sourceComponent must be LARVAE, FRASS or RESIDUE'),
   body('variants').isArray().withMessage('At least one variant is required'),
   body('variants.*.name').notEmpty(),
-  body('variants.*.quantity').isInt({ min: 0 }),
+  body('variants.*.quantity').isFloat({ min: 0 }),
   body('variants.*.price').isFloat({ min: 0 }),
   body('batchAllocations').optional().isArray().withMessage('batchAllocations must be an array')
 ], async (req, res, next) => {
@@ -141,6 +273,7 @@ router.post('/', authenticate, authorize('MANAGER', 'ADMIN'), [
       description,
       shortDescription,
       category,
+      sourceComponent,
       images,
       tags,
       farmId,
@@ -148,9 +281,10 @@ router.post('/', authenticate, authorize('MANAGER', 'ADMIN'), [
     } = req.body;
 
     // ── Source batches (from Post-Processing) ─────────────────────────────────
-    // A product can be drawn from one or more completed batches. Each selected
-    // batch is validated against its remaining output; the used amount is then
-    // recorded as a PRODUCT_ALLOCATION entry so it deducts from the batch.
+    // A product can be drawn from one or more completed batches, and from a
+    // specific source component (Larvae / Frass / Residue). Each selection is
+    // validated against that component's remaining output; the used amount is
+    // then recorded as a PRODUCT_ALLOCATION entry so it deducts from the batch.
     const batchAllocations = Array.isArray(req.body.batchAllocations)
       ? req.body.batchAllocations
       : [];
@@ -160,6 +294,18 @@ router.post('/', authenticate, authorize('MANAGER', 'ADMIN'), [
       const batchId = typeof entry?.batchId === 'string' ? entry.batchId : null;
       const quantityKg = Number(entry?.quantityKg) || 0;
       if (!batchId || quantityKg <= 0) continue;
+
+      // Optional source component. Older clients omit it and are validated
+      // against the batch total instead.
+      const rawComponent = typeof entry?.component === 'string'
+        ? entry.component.toUpperCase()
+        : null;
+      const component = rawComponent && SOURCE_COMPONENTS.includes(rawComponent)
+        ? rawComponent
+        : null;
+      if (rawComponent && !component) {
+        throw new AppError(`Unknown source component "${entry.component}"`, 400);
+      }
 
       // ADMIN/MANAGER may only draw from batches their company owns.
       if (req.user.adminId) {
@@ -187,9 +333,17 @@ router.post('/', authenticate, authorize('MANAGER', 'ADMIN'), [
       if (!sourceBatch) throw new AppError('Batch not found', 404);
 
       const availability = batchOutputSummary(sourceBatch);
-      if (quantityKg > availability.remainingKg + 0.0001) {
+      // Validate against the chosen component when one is given, otherwise
+      // against the batch's overall remaining output.
+      const remainingKg = component
+        ? availability.components?.[component]?.remainingKg ?? 0
+        : availability.remainingKg;
+      if (quantityKg > remainingKg + 0.0001) {
+        const scope = component
+          ? `${sourceBatch.batchNumber} ${component.toLowerCase()}`
+          : sourceBatch.batchNumber;
         throw new AppError(
-          `Batch ${sourceBatch.batchNumber} only has ${availability.remainingKg} kg remaining`,
+          `Batch ${scope} only has ${remainingKg} kg remaining`,
           400
         );
       }
@@ -197,6 +351,7 @@ router.post('/', authenticate, authorize('MANAGER', 'ADMIN'), [
       resolvedAllocations.push({
         batchId:      sourceBatch.id,
         batchNumber:  sourceBatch.batchNumber,
+        component,
         quantityKg,
       });
     }
@@ -218,6 +373,7 @@ router.post('/', authenticate, authorize('MANAGER', 'ADMIN'), [
         description,
         shortDescription,
         category,
+        sourceComponent: sourceComponent ?? null,
         images: images || [],
         tags: [
           ...(tags || []),
@@ -231,7 +387,7 @@ router.post('/', authenticate, authorize('MANAGER', 'ADMIN'), [
           create: variants.map(variant => ({
             name: variant.name,
             sku: variant.sku || `${slug}-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
-            quantity: parseInt(variant.quantity),
+            quantity: normalizeQuantity(variant.quantity),
             price: parseFloat(variant.price),
             comparePrice: variant.comparePrice ? parseFloat(variant.comparePrice) : null,
             cost: variant.cost ? parseFloat(variant.cost) : null,
@@ -263,6 +419,7 @@ router.post('/', authenticate, authorize('MANAGER', 'ADMIN'), [
                 type:        'PRODUCT_ALLOCATION',
                 productId:   product.id,
                 productName: name,
+                component:   a.component ?? undefined,
                 quantityKg:  a.quantityKg,
                 batchNumber: a.batchNumber,
               },
@@ -284,7 +441,7 @@ router.post('/', authenticate, authorize('MANAGER', 'ADMIN'), [
 });
 
 // Get product by ID
-router.get('/:id', authenticate, async (req, res, next) => {
+router.get('/:id', optionalAuth, async (req, res, next) => {
   try {
     await assertProductAccess(req.params.id, req);
 
@@ -303,6 +460,10 @@ router.get('/:id', authenticate, async (req, res, next) => {
     });
     
     if (!product) {
+      throw new AppError('Product not found', 404);
+    }
+    // Guests must never see draft/inactive products.
+    if (!req.user && product.status !== 'ACTIVE') {
       throw new AppError('Product not found', 404);
     }
     
@@ -449,7 +610,7 @@ router.post('/:id/variants', authenticate, authorize('MANAGER', 'ADMIN'), [
         productId: req.params.id,
         name,
         sku: sku || `${product.slug}-${Date.now()}`,
-        quantity: parseInt(quantity),
+        quantity: normalizeQuantity(quantity),
         price: parseFloat(price),
         comparePrice: comparePrice ? parseFloat(comparePrice) : null,
         cost: cost ? parseFloat(cost) : null,
@@ -491,6 +652,11 @@ router.put('/variants/:variantId', authenticate, authorize('MANAGER', 'ADMIN'), 
         updateData[field] = parseFloat(updateData[field]);
       }
     });
+
+    // Keep quantity within a sane, 2-decimal range.
+    if (updateData.quantity !== undefined) {
+      updateData.quantity = normalizeQuantity(updateData.quantity);
+    }
     
     const updatedVariant = await prisma.productVariant.update({
       where: { id: req.params.variantId },
@@ -599,7 +765,7 @@ router.post('/:id/reviews', authenticate, [
 });
 
 // Get product reviews
-router.get('/:id/reviews', authenticate, async (req, res, next) => {
+router.get('/:id/reviews', optionalAuth, async (req, res, next) => {
   try {
     const { page = 1, limit = 20 } = req.query;
     const skip = (page - 1) * limit;
@@ -635,7 +801,7 @@ router.get('/:id/reviews', authenticate, async (req, res, next) => {
 });
 
 // Get product categories
-router.get('/categories/list', authenticate, async (req, res) => {
+router.get('/categories/list', optionalAuth, async (req, res) => {
   const categories = [
     { id: 'ORGANIC_FERTILIZER', name: 'Organic Fertilizer', icon: '🌱' },
     { id: 'PROTEIN_FEED', name: 'Protein Feed', icon: '🐓' },

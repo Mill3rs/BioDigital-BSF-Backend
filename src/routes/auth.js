@@ -15,7 +15,14 @@ router.get("/public-settings", async (req, res, next) => {
       where: { key: "phone_auth_enabled" },
     });
     const phoneAuthEnabled = setting ? setting.value === "true" : false;
-    res.json({ success: true, data: { phoneAuthEnabled } });
+
+    // Checkout needs the admin-configured delivery fee, including for guests.
+    const deliverySetting = await prisma.systemSetting.findUnique({
+      where: { key: "delivery_price" },
+    });
+    const deliveryFee = deliverySetting ? Number(deliverySetting.value) || 0 : 0;
+
+    res.json({ success: true, data: { phoneAuthEnabled, deliveryFee } });
   } catch (error) {
     next(error);
   }

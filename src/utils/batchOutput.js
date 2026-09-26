@@ -2,6 +2,19 @@
 // logs. Source of truth used by the post-processing routes and the admin
 // dashboard stats so both surfaces aggregate output identically.
 
+// The three source components a catalogue product can be drawn from. These map
+// to the Stage-4 (Harvesting) fractions recorded on the harvest form —
+// Larvae + Frass + Residue — which is the output breakdown surfaced when a
+// product is created from a completed batch on the Products page.
+const SOURCE_COMPONENTS = ['LARVAE', 'FRASS', 'RESIDUE'];
+
+// Human label for each source component (used by the Products page picker).
+const SOURCE_COMPONENT_LABELS = {
+  LARVAE:  'Larvae',
+  FRASS:   'Frass',
+  RESIDUE: 'Residue',
+};
+
 /**
  * Extract harvest fractions recorded on the Stage 4 (Harvesting) form
  * (most recent wins). The data is stored on the transition entry created when
@@ -149,6 +162,10 @@ function summarizeBatchOutputs(batches) {
 function aggregateAllocations(activityLogs) {
   const records = [];
   const byProduct = {};
+  // Amounts drawn per source component (LARVAE / FRASS / RESIDUE). Records
+  // created before the component field existed carry no component and only
+  // count towards the batch total.
+  const byComponent = {};
   let totalKg = 0;
   for (const l of activityLogs) {
     if (l.action !== 'NOTE_ADDED' || l.metadata?.type !== 'PRODUCT_ALLOCATION') continue;
@@ -158,17 +175,20 @@ function aggregateAllocations(activityLogs) {
     totalKg += kg;
     const name = m.productName ?? 'Product';
     byProduct[name] = (byProduct[name] ?? 0) + kg;
+    const component = SOURCE_COMPONENTS.includes(m.component) ? m.component : null;
+    if (component) byComponent[component] = (byComponent[component] ?? 0) + kg;
     records.push({
       id:          l.id,
       productId:   m.productId   ?? null,
       productName: name,
+      component,
       quantityKg:  kg,
       recordedBy:  l.performedBy?.fullName ?? null,
       recordedAt:  l.timestamp,
     });
   }
   const round = (n) => Math.round(n * 100) / 100;
-  return { totalKg: round(totalKg), byProduct, records };
+  return { totalKg: round(totalKg), byProduct, byComponent, records };
 }
 
 /** Total positive product-level weight recorded for a batch. */
@@ -180,13 +200,64 @@ function sumAvailableKg(harvest, output) {
     output?.bsfMealKg,
     output?.bsfOilKg,
     harvest?.harvestRecycled  ?? output?.recycledLarvaeKg,
+    harvest?.residue,
   ];
   return rows.reduce((s, v) => s + (Number(v) > 0 ? Number(v) : 0), 0);
 }
 
 /**
+ * Per-component output for a batch: the Stage-4 harvest fractions (Larvae /
+ * Frass / Residue). Batches that only carry an End-Batch output fall back to
+ * the larvae / frass product weights, leaving residue at 0.
+ */
+function extractComponents(harvest, output) {
+  return {
+    LARVAE:  Number(harvest?.harvestBsfLarvae ?? harvest?.larvaeHarvested ?? output?.bsfLarvaeKg ?? 0) || 0,
+    FRASS:   Number(harvest?.harvestFrass ?? output?.frassFertilizerKg ?? 0) || 0,
+    RESIDUE: Number(harvest?.residue ?? 0) || 0,
+  };
+}
+
+/**
+ * Availability broken down by source component (Larvae / Frass / Residue):
+ * recorded output minus what has been bagged and minus what has been allocated
+ * to catalogue products for that component.
+ */
+function componentAvailability(harvest, output, bagging, allocation) {
+  const available = extractComponents(harvest, output);
+  const round = (n) => Math.round(n * 100) / 100;
+
+  // Bagging products are keyed by product name; map the ones that belong to a
+  // source component. Meal / Oil / Prepupae stay outside the three components.
+  const baggedFor = (key) => {
+    if (key === 'LARVAE') {
+      return (bagging['BSF Larvae']?.baggedKg ?? 0) +
+             (bagging['Live Larvae (recycled)']?.baggedKg ?? 0);
+    }
+    if (key === 'FRASS') return bagging['Frass Fertilizer']?.baggedKg ?? 0;
+    return 0;
+  };
+
+  const components = {};
+  for (const key of SOURCE_COMPONENTS) {
+    const availableKg = Number(available[key]) || 0;
+    const baggedKg    = baggedFor(key);
+    const allocatedKg = allocation.byComponent[key] ?? 0;
+    components[key] = {
+      label:       SOURCE_COMPONENT_LABELS[key],
+      availableKg: round(availableKg),
+      baggedKg:    round(baggedKg),
+      allocatedKg: round(allocatedKg),
+      remainingKg: round(Math.max(0, availableKg - baggedKg - allocatedKg)),
+    };
+  }
+  return components;
+}
+
+/**
  * Availability summary for a batch: recorded output minus what has been bagged
- * and minus what has been allocated to catalogue products.
+ * and minus what has been allocated to catalogue products. `components` breaks
+ * the same figures down per source component (Larvae / Frass / Residue).
  */
 function batchOutputSummary(batch) {
   const harvest = extractHarvest(batch.activityLogs ?? []);
@@ -203,12 +274,16 @@ function batchOutputSummary(batch) {
     baggedKg:    round(baggedKg),
     allocatedKg: allocation.totalKg,
     remainingKg: round(Math.max(0, availableKg - baggedKg - allocation.totalKg)),
+    components:  componentAvailability(harvest, output, bagging, allocation),
   };
 }
 
 module.exports = {
+  SOURCE_COMPONENTS,
+  SOURCE_COMPONENT_LABELS,
   extractHarvest,
   extractOutput,
+  extractComponents,
   aggregateBagging,
   aggregateAllocations,
   batchOutputSummary,

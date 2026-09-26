@@ -572,6 +572,10 @@ model Product {
   shortDescription String?
   images           String[]
   category         ProductCategory
+  // Physical output the product was drawn from (Larvae / Frass / Residue).
+  // Surfaced as "Category" on the Products page; `category` above is surfaced
+  // there as "Product Type". Nullable for rows created before this field.
+  sourceComponent  String?
   status           ProductStatus   @default(ACTIVE)
   featured         Boolean         @default(false)
   tags             String[]
@@ -624,7 +628,7 @@ model ProductVariant {
   product          Product  @relation(fields: [productId], references: [id])
   name             String
   sku              String   @unique
-  quantity         Int
+  quantity         Float
   price            Float
   comparePrice     Float? // Original price for sale
   cost             Float? // Cost price

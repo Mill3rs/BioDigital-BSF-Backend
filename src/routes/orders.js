@@ -1,7 +1,7 @@
 const express = require('express');
 const { body, validationResult } = require('express-validator');
 const { prisma } = require('../config/database');
-const { authenticate, authorize } = require('../middleware/auth');
+const { authenticate, authorize, optionalAuth } = require('../middleware/auth');
 const { AppError } = require('../middleware/errorHandler');
 const { generateOrderNumber } = require('../utils/helpers');
 const emailService = require('../services/emailService');
@@ -114,7 +114,7 @@ router.get('/', authenticate, async (req, res, next) => {
 });
 
 // Create order
-router.post('/', authenticate, [
+router.post('/', optionalAuth, [
   body('items').isArray().withMessage('Items must be an array'),
   body('items.*.variantId').notEmpty().withMessage('Variant ID is required'),
   body('items.*.quantity').isInt({ min: 1 }).withMessage('Quantity must be at least 1'),
@@ -127,7 +127,27 @@ router.post('/', authenticate, [
   }
 
   try {
-    const { items, deliveryAddress, deliveryInstructions, paymentMethod, specialInstructions } = req.body;
+    const {
+      items,
+      deliveryAddress,
+      deliveryInstructions,
+      paymentMethod,
+      specialInstructions,
+      contact,
+    } = req.body;
+
+    // Guests can check out without an account, but we still need a way to
+    // reach them about the delivery.
+    const isGuest = !req.user;
+    const guestName = isGuest ? String(contact?.name ?? '').trim() : '';
+    const guestPhone = isGuest ? String(contact?.phone ?? '').trim() : '';
+    const guestEmail = isGuest ? String(contact?.email ?? '').trim() : '';
+    if (isGuest && (!guestName || !guestPhone)) {
+      throw new AppError(
+        'Please provide your name and phone number to place this order.',
+        400,
+      );
+    }
     
     let subtotal = 0;
     const orderItems = [];
@@ -157,15 +177,23 @@ router.post('/', authenticate, [
       });
     }
     
-    const shippingCost = 0;
+    // Delivery fee is configured by the admin (Settings → Delivery Price).
+    const deliverySetting = await prisma.systemSetting.findUnique({
+      where: { key: 'delivery_price' },
+    });
+    const shippingCost = deliverySetting ? Number(deliverySetting.value) || 0 : 0;
     const tax = subtotal * 0.15;
     const total = subtotal + shippingCost + tax;
     
     const order = await prisma.order.create({
       data: {
         orderNumber: generateOrderNumber(),
-        customerId: req.user.id,
-        createdById: req.user.id,
+        customerId: isGuest ? null : req.user.id,
+        createdById: isGuest ? null : req.user.id,
+        isGuest,
+        guestName: isGuest ? guestName : null,
+        guestEmail: isGuest && guestEmail ? guestEmail : null,
+        guestPhone: isGuest ? guestPhone : null,
         subtotal,
         shippingCost,
         tax,
@@ -193,14 +221,16 @@ router.post('/', authenticate, [
       });
     }
     
-    // Clear cart
-    const cart = await prisma.cart.findUnique({
-      where: { userId: req.user.id }
-    });
-    if (cart) {
-      await prisma.cartItem.deleteMany({
-        where: { cartId: cart.id }
+    // Clear the server cart. Guests keep a device-local cart that the app clears.
+    if (!isGuest) {
+      const cart = await prisma.cart.findUnique({
+        where: { userId: req.user.id }
       });
+      if (cart) {
+        await prisma.cartItem.deleteMany({
+          where: { cartId: cart.id }
+        });
+      }
     }
     
     res.status(201).json({
@@ -214,9 +244,18 @@ router.post('/', authenticate, [
 });
 
 // Get order by ID
-router.get('/:id', authenticate, async (req, res, next) => {
+router.get('/:id', optionalAuth, async (req, res, next) => {
   try {
-    await assertOrderAccess(req.params.id, req);
+    // Guests may only read guest orders; the unguessable order id acts as the
+    // access key since there is no account to check ownership against.
+    if (req.user) {
+      await assertOrderAccess(req.params.id, req);
+    } else {
+      const guestOrder = await prisma.order.count({
+        where: { id: req.params.id, isGuest: true },
+      });
+      if (!guestOrder) throw new AppError('Order not found', 404);
+    }
 
     const order = await prisma.order.findUnique({
       where: { id: req.params.id },
@@ -238,13 +277,13 @@ router.get('/:id', authenticate, async (req, res, next) => {
       throw new AppError('Order not found', 404);
     }
     
-    if (req.user.role === 'BUYER' && order.customerId !== req.user.id) {
+    if (req.user && req.user.role === 'BUYER' && order.customerId !== req.user.id) {
       throw new AppError('Access denied', 403);
     }
 
     // For COMPLETED orders, attach each item's product review by the buyer
     let responseOrder = order;
-    if (order.status === 'COMPLETED') {
+    if (order.status === 'COMPLETED' && order.customerId) {
       const productIds = order.items.map(i => i.variant.product.id);
       const reviews = await prisma.productReview.findMany({
         where: { userId: order.customerId, productId: { in: productIds } },

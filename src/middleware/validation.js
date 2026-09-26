@@ -120,7 +120,7 @@ const productValidation = {
     body('category').isIn(['ORGANIC_FERTILIZER', 'PROTEIN_FEED', 'INSECT_OIL', 'SOIL_CONDITIONER', 'DRIED_LARVAE', 'COMPOST', 'LIQUID_FERTILIZER', 'BIOCHAR', 'OTHER']),
     body('variants').isArray().withMessage('At least one variant is required'),
     body('variants.*.name').notEmpty(),
-    body('variants.*.quantity').isInt({ min: 0 }),
+    body('variants.*.quantity').isFloat({ min: 0 }),
     body('variants.*.price').isFloat({ min: 0 }),
     validate
   ],

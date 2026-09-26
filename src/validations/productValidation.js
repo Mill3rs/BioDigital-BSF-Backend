@@ -65,8 +65,8 @@ const createProductValidation = [
     .withMessage('SKU cannot exceed 50 characters'),
   
   body('variants.*.quantity')
-    .isInt({ min: 0 })
-    .withMessage('Quantity must be a non-negative integer'),
+    .isFloat({ min: 0 })
+    .withMessage('Quantity must be a non-negative number'),
   
   body('variants.*.price')
     .isFloat({ min: 0 })
@@ -221,8 +221,8 @@ const addVariantValidation = [
     .withMessage('SKU cannot exceed 50 characters'),
   
   body('quantity')
-    .isInt({ min: 0 })
-    .withMessage('Quantity must be a non-negative integer'),
+    .isFloat({ min: 0 })
+    .withMessage('Quantity must be a non-negative number'),
   
   body('price')
     .isFloat({ min: 0 })
@@ -260,8 +260,8 @@ const updateVariantValidation = [
   
   body('quantity')
     .optional()
-    .isInt({ min: 0 })
-    .withMessage('Quantity must be a non-negative integer'),
+    .isFloat({ min: 0 })
+    .withMessage('Quantity must be a non-negative number'),
   
   body('price')
     .optional()

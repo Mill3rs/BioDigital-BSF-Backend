@@ -97,7 +97,7 @@ class ProductController {
             create: variants.map(variant => ({
               name: variant.name,
               sku: variant.sku || `${slug}-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
-              quantity: parseInt(variant.quantity),
+              quantity: parseFloat(variant.quantity),
               price: parseFloat(variant.price),
               comparePrice: variant.comparePrice ? parseFloat(variant.comparePrice) : null,
               cost: variant.cost ? parseFloat(variant.cost) : null,
@@ -208,7 +208,7 @@ class ProductController {
           productId: req.params.id,
           name,
           sku: sku || `${product.slug}-${Date.now()}`,
-          quantity: parseInt(quantity),
+          quantity: parseFloat(quantity),
           price: parseFloat(price),
           comparePrice: comparePrice ? parseFloat(comparePrice) : null,
           cost: cost ? parseFloat(cost) : null,

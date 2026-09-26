@@ -60,6 +60,17 @@ const PRODUCT_CATEGORY_MAP = {
   'Live Larvae (recycled)': 'PROTEIN_FEED',
 };
 
+// Maps a BSF product name to the physical source component it is drawn from.
+// Stored on Product.sourceComponent (surfaced as "Category" on the Products page).
+const PRODUCT_SOURCE_COMPONENT_MAP = {
+  'Frass Fertilizer':       'FRASS',
+  'Prepupae':               'LARVAE',
+  'BSF Larvae':             'LARVAE',
+  'BSF Meal':               'LARVAE',
+  'BSF Oil':                'LARVAE',
+  'Live Larvae (recycled)': 'LARVAE',
+};
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 // extractHarvest / extractOutput / aggregateBagging live in
@@ -498,9 +509,15 @@ router.post(
       }
 
       const category = PRODUCT_CATEGORY_MAP[productName] ?? 'OTHER';
+      const sourceComponent = PRODUCT_SOURCE_COMPONENT_MAP[productName] ?? null;
       const baseName = `${productName} — Batch ${batch.batchNumber}`;
       const slug = baseName.toLowerCase().replace(/[^a-z0-9]+/g, '-') + '-' + Date.now();
       const quantity = bagCount && bagCount > 0 ? bagCount : Math.ceil(baggedKg);
+      // Weight of a single bag: total bagged kg spread across the bag count.
+      // Shown to buyers as the product weight in the shop.
+      const bagWeightKg = bagCount && bagCount > 0
+        ? Math.round((baggedKg / bagCount) * 100) / 100
+        : (baggedKg > 0 ? Math.round(baggedKg * 100) / 100 : null);
 
       const newProduct = await prisma.product.create({
         data: {
@@ -508,6 +525,7 @@ router.post(
           description:      `${productName} produced from BSF processing batch ${batch.batchNumber}. Total weight: ${baggedKg} kg.`,
           shortDescription: `${productName} — ${baggedKg} kg`,
           category,
+          sourceComponent,
           slug,
           images:           [],
           tags:             ['BSF', productName, batch.batchNumber],
@@ -526,6 +544,7 @@ router.post(
               cost:     Number.parseFloat(costPrice),
               unitType: 'kg',
               unitValue: baggedKg,
+              weight:   bagWeightKg,
               isActive: true,
             }],
           },

@@ -192,6 +192,9 @@ const authorizeFarmAccess = async (req, res, next) => {
 };
 
 // Optional Authentication (doesn't require token but adds user if present)
+// Mirrors `authenticate`'s req.user shape so company scoping still applies to
+// signed-in callers, but never rejects the request — public storefront reads
+// (e.g. browsing products) must work for guests.
 const optionalAuth = async (req, res, next) => {
   try {
     const token = req.headers.authorization?.split(' ')[1];
@@ -199,21 +202,49 @@ const optionalAuth = async (req, res, next) => {
     if (token) {
       const decoded = jwt.verify(token, process.env.JWT_SECRET);
       const user = await prisma.user.findUnique({
-        where: { id: decoded.userId }
+        where: { id: decoded.userId },
+        include: {
+          farm: true,
+          adminManaged: true,
+          driverProfile: true,
+          buyerProfile: true,
+          supplierProfile: true
+        }
       });
       
       if (user && user.status === 'ACTIVE') {
+        const adminId = resolveAdminId(user);
         req.user = {
           id: user.id,
           email: user.email,
           fullName: user.fullName,
-          role: user.role
+          role: user.role,
+          status: user.status,
+          farmId: user.farm?.id,
+          farm: user.farm,
+          adminManaged: user.adminManaged,
+          managedById: user.managedById,
+          adminId,
+          driverProfile: user.driverProfile,
+          buyerProfile: user.buyerProfile,
+          supplierProfile: user.supplierProfile
+        };
+        req.adminScope = {
+          adminId,
+          where(field = 'adminId', through = null) {
+            return adminScope(adminId, field, through);
+          },
+          owns(ownerId) {
+            if (!adminId) return true;
+            return ownerId === adminId;
+          },
         };
       }
     }
     
     next();
   } catch (error) {
+    // Missing/stale token — continue as a guest.
     next();
   }
 };
