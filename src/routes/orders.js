@@ -434,10 +434,12 @@ router.post('/:id/assign-driver', authenticate, authorize('ADMIN', 'MANAGER'), [
   }
 });
 
-// Update order status
-router.post('/:id/update-status', authenticate, [
+// Validation shared by the two status-update entry points below.
+const updateOrderStatusValidation = [
   body('status').isIn(['CONFIRMED', 'PROCESSING', 'READY_FOR_PICKUP', 'SHIPPED', 'OUT_FOR_DELIVERY', 'DELIVERED', 'COMPLETED'])
-], async (req, res, next) => {
+];
+
+const updateOrderStatus = async (req, res, next) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
     return res.status(400).json({ success: false, errors: errors.array() });
@@ -445,16 +447,18 @@ router.post('/:id/update-status', authenticate, [
 
   try {
     const { id } = req.params;
-    const { status, location, notes } = req.body;
-    
+    const { status, location } = req.body;
+    // The web dashboard sends `note`; the API/README uses `notes`.
+    const notes = req.body.notes ?? req.body.note;
+
     const order = await prisma.order.findUnique({
       where: { id }
     });
-    
+
     if (!order) {
       throw new AppError('Order not found', 404);
     }
-    
+
     // Only the buyer, the assigned driver, a SUPER_ADMIN, or the owning
     // company's admin/manager may advance an order.
     const isOwn = req.user.role === 'BUYER' && order.customerId === req.user.id;
@@ -462,17 +466,17 @@ router.post('/:id/update-status', authenticate, [
     if (req.user.role !== 'SUPER_ADMIN' && !isOwn && !isAssigned) {
       await assertOrderAccess(order.id, req);
     }
-    
+
     const updateData = { status };
     if (status === 'DELIVERED') {
       updateData.deliveredAt = new Date();
     }
-    
+
     const updatedOrder = await prisma.order.update({
       where: { id },
       data: updateData
     });
-    
+
     if (location && (status === 'SHIPPED' || status === 'OUT_FOR_DELIVERY')) {
       await prisma.shipment.upsert({
         where: { orderId: id },
@@ -489,7 +493,7 @@ router.post('/:id/update-status', authenticate, [
         }
       });
     }
-    
+
     res.json({
       success: true,
       message: `Order status updated to ${status}`,
@@ -498,7 +502,13 @@ router.post('/:id/update-status', authenticate, [
   } catch (error) {
     next(error);
   }
-});
+};
+
+// Update order status.
+// PATCH /:id/status — web dashboard (mirrors the Support tickets API).
+// POST /:id/update-status — legacy (mobile app + README), kept for compatibility.
+router.patch('/:id/status', authenticate, updateOrderStatusValidation, updateOrderStatus);
+router.post('/:id/update-status', authenticate, updateOrderStatusValidation, updateOrderStatus);
 
 // Buyer confirms delivery and (optionally) rates the driver
 router.post('/:id/confirm-delivery', authenticate, authorize('BUYER'), [
