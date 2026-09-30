@@ -510,6 +510,79 @@ const updateOrderStatus = async (req, res, next) => {
 router.patch('/:id/status', authenticate, updateOrderStatusValidation, updateOrderStatus);
 router.post('/:id/update-status', authenticate, updateOrderStatusValidation, updateOrderStatus);
 
+// Confirm a post-delivery payment.
+// Buyers who pay after receiving the goods (e.g. cash/mobile money on delivery)
+// leave the order PENDING; an ADMIN/MANAGER records the method actually used and
+// marks the order paid.
+router.post('/:id/confirm-payment', authenticate, authorize('ADMIN', 'MANAGER', 'SUPER_ADMIN'), [
+  body('method')
+    .isIn(['CASH_ON_DELIVERY', 'MOBILE_MONEY', 'BANK_TRANSFER'])
+    .withMessage('method must be CASH_ON_DELIVERY, MOBILE_MONEY or BANK_TRANSFER'),
+  body('reference').optional({ values: 'falsy' }).isString().isLength({ max: 200 }),
+  body('notes').optional({ values: 'falsy' }).isString().isLength({ max: 500 }),
+], async (req, res, next) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return res.status(400).json({ success: false, errors: errors.array() });
+  }
+
+  try {
+    const { id } = req.params;
+    const { method, reference, notes } = req.body;
+
+    // Company/farm scoping for ADMIN/MANAGER (throws 404 when out of scope).
+    await assertOrderAccess(id, req);
+
+    const order = await prisma.order.findUnique({
+      where: { id },
+      select: { id: true, status: true, paymentStatus: true, paymentDetails: true },
+    });
+    if (!order) {
+      throw new AppError('Order not found', 404);
+    }
+    if (order.paymentStatus === 'PAID') {
+      throw new AppError('This order has already been marked as paid.', 409);
+    }
+    if (!['DELIVERED', 'COMPLETED'].includes(order.status)) {
+      throw new AppError(
+        'Payment can only be confirmed after the order has been delivered.',
+        400,
+      );
+    }
+
+    const existingDetails =
+      order.paymentDetails && typeof order.paymentDetails === 'object'
+        ? order.paymentDetails
+        : {};
+
+    const updatedOrder = await prisma.order.update({
+      where: { id },
+      data: {
+        paymentMethod: method,
+        paymentStatus: 'PAID',
+        paidAt: new Date(),
+        paymentDetails: {
+          ...existingDetails,
+          method,
+          reference: reference || null,
+          notes: notes || null,
+          confirmedBy: req.user.id,
+          confirmedByName: req.user.fullName ?? null,
+          confirmedAt: new Date().toISOString(),
+        },
+      },
+    });
+
+    res.json({
+      success: true,
+      message: `Payment confirmed (${method}).`,
+      data: updatedOrder,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // Buyer confirms delivery and (optionally) rates the driver
 router.post('/:id/confirm-delivery', authenticate, authorize('BUYER'), [
   body('driverRating').optional().isInt({ min: 1, max: 5 }),
